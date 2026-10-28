@@ -1,0 +1,9 @@
+spring:
+  datasource:
+    url: ${DB_URL:jdbc:postgresql://localhost:5432/ativaflow}
+    username: ${DB_USERNAME:ativaflow}
+    password: ${DB_PASSWORD}
+
+app:
+  activation-provider:
+    base-url: ${ACTIVATION_PROVIDER_BASE_URL:http://localhost:8081}
