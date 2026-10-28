@@ -65,8 +65,27 @@ Pacote base: `com.rensilver.ativaflow_api`.
 | `.gitattributes` | Padronização de finais de linha dos scripts do Maven Wrapper. |
 
 O Hibernate está configurado com `ddl-auto: validate` e `open-in-view: false`.
-O diretório `src/main/resources/db/migration/` está reservado para migrações do
-Flyway e ainda não contém scripts SQL. Os diretórios `infra/wiremock/mappings/`,
+O Flyway aplica as migrações de `src/main/resources/db/migration/` na inicialização.
+A migração `V1__create_activation_requests.sql` cria a tabela `activation_requests`:
+
+| Coluna | Tipo e regras |
+| --- | --- |
+| `id` | UUID, chave primária; gerado pela aplicação. |
+| `external_id` | `VARCHAR(100)`, obrigatório e único globalmente. |
+| `customer_id` | `VARCHAR(100)`, obrigatório; identificador textual do cliente. |
+| `product_code` | `VARCHAR(100)`, obrigatório. |
+| `status` | `VARCHAR(20)`, obrigatório; aceita `PENDING` (padrão), `PROCESSING`, `COMPLETED` e `FAILED`. |
+| `created_at` | `TIMESTAMP WITH TIME ZONE`, obrigatório; padrão `CURRENT_TIMESTAMP`. |
+| `updated_at` | `TIMESTAMP WITH TIME ZONE`, obrigatório; padrão `CURRENT_TIMESTAMP`. |
+
+Os nomes em `snake_case` correspondem aos campos `externalId`, `customerId`,
+`productCode`, `createdAt` e `updatedAt` do contrato da API. O limite adotado para
+os três identificadores textuais é de 100 caracteres. As datas representam
+instantes, compatíveis com `Instant` e exposição em UTC. O padrão de `updated_at`
+vale apenas para inserções; a aplicação deverá atualizá-lo a cada alteração,
+sem trigger no banco. O controle de transições de status também caberá ao domínio.
+
+Os diretórios `infra/wiremock/mappings/`,
 `infra/wiremock/__files/` e `docs/adr/` também estão preparados, sem conteúdo além
 dos arquivos `.gitkeep`.
 
@@ -137,6 +156,9 @@ perfil `test`. `TestcontainersConfiguration` disponibiliza PostgreSQL com a
 imagem `postgres:17-alpine`, sem depender do banco ou das credenciais locais.
 `RestClientWireMockTests` verifica uma chamada HTTP com `RestClient` e um
 servidor WireMock iniciado pelo próprio teste.
+`FlywayMigrationTests` verifica a aplicação e validação da migração inicial,
+persistência dos campos e valores padrão, unicidade global de `external_id`
+e rejeição de status desconhecido no PostgreSQL real.
 
 Também é possível executar a aplicação com o PostgreSQL do Testcontainers e o
 perfil `test` por meio de `TestAtivaflowApiApplication`:
