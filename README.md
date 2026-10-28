@@ -224,6 +224,16 @@ duplicidades, existência de cliente ou disponibilidade do produto.
 do enum como status e datas UTC em ISO-8601. Não contém proprietário,
 versão, contadores ou outros metadados internos.
 
+`mapper.ActivationRequestMapper` é um bean Spring gerado pelo MapStruct e oferece
+`toResponse(ActivationRequest)`. As políticas `unmappedTargetPolicy` e
+`unmappedSourcePolicy` usam `ReportingPolicy.ERROR`: propriedades sem mapeamento
+na resposta ou na entidade impedem a compilação. Os oito metadados internos
+existentes são exceções explícitas em `ignoreUnmappedSourceProperties`;
+essa lista dispensa apenas o diagnóstico de origem e não autoriza adicioná-los
+ao DTO público. O teste de JSON protege os sete campos permitidos na resposta.
+O mapper preserva identificadores, status e instantes, sem atribuir datas:
+auditoria ainda não preenchida permanece nula, e entidade nula produz resposta nula.
+
 Os DTOs definem os contratos; os endpoints ainda estão pendentes. A validação
 das entradas deverá ser acionada com `@Valid` no parâmetro `@RequestBody` dos
 controllers quando forem implementados. As anotações não validam automaticamente
@@ -336,6 +346,10 @@ sem banco ou contexto Spring.
 `ActivationDtosJsonTests` usa `@JsonTest` para verificar leitura/escrita do payload,
 preservação dos identificadores e serialização exclusiva dos sete campos públicos,
 incluindo os quatro status e datas UTC, sem depender de Docker.
+`ActivationRequestMapperTests` usa `@JsonTest` com o mapper gerado e descoberto
+como bean Spring para verificar a conversão nos quatro estados, preservação
+dos valores e ausência dos oito metadados internos no JSON mesmo quando
+preenchidos, além de entrada nula e datas anteriores à persistência, sem Docker.
 `ActivationRequestPersistenceTests` verifica o mapeamento completo
 contra as migrações no PostgreSQL, leitura dos quatro estados como texto,
 auditoria com relógio controlado e sessão SQL fora de UTC, preservação da data
