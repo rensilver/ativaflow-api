@@ -2,7 +2,8 @@
 
 Projeto Java 21 com Spring Boot 3.5.16, organizado em camadas para uma API REST.
 A base atual reúne dependências, configurações por ambiente, estrutura de pacotes,
-migrações e entidade JPA com transições de estado, auditoria e controle otimista.
+migrações, entidade JPA com transições de estado, auditoria e controle otimista,
+e DTOs públicos como records com Bean Validation na entrada.
 Os pacotes de aplicação possuem suas responsabilidades descritas em
 `package-info.java`; endpoints e integração com o provedor ainda estão pendentes.
 
@@ -116,13 +117,13 @@ adiciona os campos internos abaixo, preservando a V1 e o contrato público:
 consumidor autenticado; o segundo identifica o cliente informado no pedido.
 A derivação de `consumer_id` da identidade confiável do JWT (por exemplo,
 `client_id`) será implementada na etapa de autenticação. Ele não poderá ser
-aceito do payload. Os DTOs públicos deverão aceitar apenas `externalId`,
-`customerId` e `productCode` na criação e expor apenas `id`, `externalId`,
+aceito do payload. Os DTOs públicos aceitam apenas `externalId`,
+`customerId` e `productCode` na criação e expõem apenas `id`, `externalId`,
 `customerId`, `productCode`, `status`, `createdAt` e `updatedAt` nas respostas.
 Nenhuma das oito colunas internas deverá ser exposta na API.
 
-O schema e a entidade JPA estão implementados e cobertos por testes.
-Autenticação, DTOs, endpoints, worker, retries, lease e reconciliação ainda estão
+O schema, a entidade JPA e os DTOs estão implementados e cobertos por testes.
+Autenticação, endpoints, worker, retries, lease e reconciliação ainda estão
 pendentes. Os campos opcionais começam nulos; a sinalização de reconciliação
 permitirá manter um resultado ambíguo em
 `PROCESSING`, sem adicionar estados públicos. O limite de tentativas será
@@ -171,6 +172,33 @@ proprietários antes de aplicar essa migração a um banco com dados.
 Os diretórios `infra/wiremock/mappings/`,
 `infra/wiremock/__files/` e `docs/adr/` também estão preparados, sem conteúdo além
 dos arquivos `.gitkeep`.
+
+## Contratos de entrada e saída
+
+`dto.request.CreateActivationRequest` é um record com os campos `externalId`,
+`customerId` e `productCode`. Cada campo usa `@NotBlank` e `@Size(max = 100)`:
+valores nulos, vazios, compostos apenas por espaços em branco ou com mais de
+100 caracteres são inválidos. Os identificadores são preservados sem trim
+ou outra normalização, em conformidade com a entidade e as colunas do banco.
+
+```json
+{
+  "externalId": "EXT-12345",
+  "customerId": "CUST-10001",
+  "productCode": "INTERNET-500"
+}
+```
+
+`dto.response.ActivationRequestResponse` é um record com `id` (`UUID`),
+`externalId`, `customerId`, `productCode`, `status` (`ActivationStatus`),
+`createdAt` e `updatedAt` (`Instant`). O JSON usa UUID textual, os quatro nomes
+do enum como status e datas UTC em ISO-8601. Não contém proprietário,
+versão, contadores ou outros metadados internos.
+
+Os DTOs definem os contratos; os endpoints ainda estão pendentes. A validação
+das entradas deverá ser acionada com `@Valid` no parâmetro `@RequestBody` dos
+controllers quando forem implementados. As anotações não validam automaticamente
+uma chamada direta ao construtor do record.
 
 ## Perfis e variáveis de ambiente
 
@@ -272,7 +300,12 @@ de proprietário não vazio, rejeição de contadores negativos, unicidade globa
 de `external_id` entre consumidores e rejeição de status desconhecido no
 PostgreSQL real.
 `ActivationRequestTests` verifica criação, validações, encapsulamento e transições
-de estado. `ActivationRequestPersistenceTests` verifica o mapeamento completo
+de estado. `CreateActivationRequestTests` usa o validador Jakarta real para
+verificar obrigatoriedade e limites dos três campos, sem banco ou contexto Spring.
+`ActivationDtosJsonTests` usa `@JsonTest` para verificar leitura/escrita do payload,
+preservação dos identificadores e serialização exclusiva dos sete campos públicos,
+incluindo os quatro status e datas UTC, sem depender de Docker.
+`ActivationRequestPersistenceTests` verifica o mapeamento completo
 contra as migrações no PostgreSQL, leitura dos quatro estados como texto,
 auditoria com relógio controlado e sessão SQL fora de UTC, preservação da data
 de criação e rejeição de gravação obsoleta entre dois contextos de persistência.
