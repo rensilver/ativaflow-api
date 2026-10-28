@@ -143,6 +143,54 @@
 			<artifactId>testcontainers-postgresql</artifactId>
 			<scope>test</scope>
 		</dependency>
+		<dependency>
+			<groupId>org.mapstruct</groupId>
+			<artifactId>mapstruct</artifactId>
+			<version>1.6.3</version>
+			<scope>compile</scope>
+		</dependency>
+		<dependency>
+			<groupId>org.mapstruct</groupId>
+			<artifactId>mapstruct-processor</artifactId>
+			<version>1.6.3</version>
+			<scope>compile</scope>
+		</dependency>
+		<dependency>
+			<groupId>org.projectlombok</groupId>
+			<artifactId>lombok-mapstruct-binding</artifactId>
+			<version>0.2.0</version>
+			<scope>compile</scope>
+		</dependency>
+		<dependency>
+			<groupId>org.wiremock</groupId>
+			<artifactId>wiremock</artifactId>
+			<version>3.13.2</version>
+			<scope>test</scope>
+		</dependency>
+		<dependency>
+			<groupId>org.testcontainers</groupId>
+			<artifactId>postgresql</artifactId>
+			<version>1.21.4</version>
+			<scope>test</scope>
+		</dependency>
+		<dependency>
+			<groupId>com.tngtech.archunit</groupId>
+			<artifactId>archunit</artifactId>
+			<version>1.5.1</version>
+			<scope>test</scope>
+		</dependency>
+		<dependency>
+			<groupId>org.awaitility</groupId>
+			<artifactId>awaitility</artifactId>
+			<version>4.3.0</version>
+			<scope>test</scope>
+		</dependency>
+		<dependency>
+			<groupId>org.springframework.security</groupId>
+			<artifactId>spring-security-test</artifactId>
+			<version>7.1.2</version>
+			<scope>test</scope>
+		</dependency>
 	</dependencies>
 
 	<build>
