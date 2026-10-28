@@ -1,10 +1,10 @@
 # AtivaFlow API
 
 Projeto Java 21 com Spring Boot 3.5.16, organizado em camadas para uma API REST.
-A base atual reúne dependências, configurações por ambiente, estrutura de pacotes
-e testes de inicialização e comunicação HTTP. Os pacotes de aplicação possuem
-suas responsabilidades descritas em `package-info.java`; endpoints e regras de
-negócio ainda não estão implementados.
+A base atual reúne dependências, configurações por ambiente, estrutura de pacotes,
+migrações e entidade JPA com transições de estado, auditoria e controle otimista.
+Os pacotes de aplicação possuem suas responsabilidades descritas em
+`package-info.java`; endpoints e integração com o provedor ainda estão pendentes.
 
 ## Tecnologias e dependências
 
@@ -95,7 +95,7 @@ Os nomes em `snake_case` correspondem aos campos `externalId`, `customerId`,
 os três identificadores textuais é de 100 caracteres. As datas representam
 instantes, compatíveis com `Instant` e exposição em UTC. O padrão de `updated_at`
 vale apenas para inserções; a aplicação deverá atualizá-lo a cada alteração,
-sem trigger no banco. O controle de transições de status também caberá ao domínio.
+sem trigger no banco. A entidade aplica as transições de status descritas abaixo.
 
 A migração `V2__add_activation_request_owner_and_processing_metadata.sql`
 adiciona os campos internos abaixo, preservando a V1 e o contrato público:
@@ -103,7 +103,7 @@ adiciona os campos internos abaixo, preservando a V1 e o contrato público:
 | Coluna interna | Tipo e finalidade |
 | --- | --- |
 | `consumer_id` | `VARCHAR(100)`, obrigatório, sem padrão; rejeita texto vazio ou composto apenas por espaços em branco. Identifica o consumidor proprietário da solicitação. |
-| `version` | `BIGINT`, obrigatório, padrão `0`, não negativo; reservado para controle de concorrência otimista com `@Version`. |
+| `version` | `BIGINT`, obrigatório, padrão `0`, não negativo; controle de concorrência otimista com `@Version`. |
 | `attempt_count` | `INTEGER`, obrigatório, padrão `0`, não negativo; quantidade de tentativas de envio ao provedor. |
 | `next_attempt_at` | `TIMESTAMP WITH TIME ZONE`, opcional; instante da próxima tentativa, quando houver retry agendado. |
 | `lease_until` | `TIMESTAMP WITH TIME ZONE`, opcional; vencimento da posse temporária do processamento. |
@@ -120,15 +120,46 @@ aceito do payload. Os DTOs públicos deverão aceitar apenas `externalId`,
 `customerId`, `productCode`, `status`, `createdAt` e `updatedAt` nas respostas.
 Nenhuma das oito colunas internas deverá ser exposta na API.
 
-Esta entrega implementa somente o schema, seus testes e esta documentação.
-Autenticação, entidades/DTOs, controle otimista, worker, retries, lease e
-reconciliação ainda estão pendentes. Os campos opcionais começam nulos; a
-sinalização de reconciliação permitirá manter um resultado ambíguo em
+O schema e a entidade JPA estão implementados e cobertos por testes.
+Autenticação, DTOs, endpoints, worker, retries, lease e reconciliação ainda estão
+pendentes. Os campos opcionais começam nulos; a sinalização de reconciliação
+permitirá manter um resultado ambíguo em
 `PROCESSING`, sem adicionar estados públicos. O limite de tentativas será
 aplicado pelo processamento; a constraint do banco impede somente contagens
 negativas. A unicidade de `external_id` continua global, inclusive entre
 consumidores. Índices para consultas/claim serão definidos quando essas
 operações forem implementadas.
+
+`model.ActivationRequest` mapeia todas as colunas de V1/V2, com acesso JPA pelos
+campos e construtor sem argumentos `protected`, compatível com o Hibernate.
+O construtor público recebe `externalId`, `customerId`, `productCode` e
+`consumerId`, exige texto não vazio de até 100 caracteres, preserva os valores
+sem normalização, gera o UUID na aplicação e inicia em `PENDING`. O proprietário
+deve ser fornecido pela camada de autenticação confiável, nunca pelo payload.
+
+A entidade expõe getters, sem setters públicos ou builder. As mudanças de estado
+ocorrem por `startProcessing()` (`PENDING → PROCESSING`), `complete()`
+(`PROCESSING → COMPLETED`) e `fail(errorCode)` (`PROCESSING → FAILED`).
+Transições inválidas lançam `InvalidActivationStatusTransitionException`;
+estados terminais não podem ser reabertos. `fail` exige texto não vazio de até
+100 caracteres para `last_error_code`; o chamador deve fornecer apenas um código
+categorizado, sem resposta bruta do provedor. As operações de retry, claim e reconciliação serão adicionadas
+com suas próprias regras; esta entidade ainda não implementa o processamento.
+
+`createdAt` e `updatedAt` usam `Instant`, com `@CreatedDate`, `@LastModifiedDate`
+e `AuditingEntityListener`. `JpaAuditingConfiguration` habilita a auditoria com
+um `DateTimeProvider` baseado em `Clock.systemUTC()`. As datas são preenchidas
+na persistência; `updatedAt` também muda quando uma alteração é enviada ao banco,
+e `createdAt` não é atualizável. Identidade e campos de criação também não são
+atualizáveis. Todos os horários internos usam `Instant`, compatível com as colunas
+`TIMESTAMP WITH TIME ZONE`, sem depender do fuso local da JVM ou da sessão SQL.
+
+O campo `version` é `Long` com `@Version`: permanece nulo antes da primeira
+persistência (permitindo ao Spring Data reconhecer uma entidade nova mesmo com
+UUID atribuído), recebe `0` na inserção e é incrementado pelo Hibernate nas
+atualizações. Gravações com versão desatualizada são rejeitadas por lock otimista.
+Atualizações SQL diretas, como o futuro claim do worker, precisarão controlar
+explicitamente a versão e a auditoria, pois não passam pelos callbacks JPA.
 
 A V2 pressupõe a tabela `activation_requests` vazia, conforme o cenário atual
 de desenvolvimento. Não há proprietário padrão nem backfill inferido de
@@ -212,6 +243,11 @@ persistência dos campos públicos e internos, valores padrão, obrigatoriedade
 de proprietário não vazio, rejeição de contadores negativos, unicidade global
 de `external_id` entre consumidores e rejeição de status desconhecido no
 PostgreSQL real.
+`ActivationRequestTests` verifica criação, validações, encapsulamento e transições
+de estado. `ActivationRequestPersistenceTests` verifica o mapeamento completo
+contra as migrações no PostgreSQL, leitura dos quatro estados como texto,
+auditoria com relógio controlado e sessão SQL fora de UTC, preservação da data
+de criação e rejeição de gravação obsoleta entre dois contextos de persistência.
 
 Também é possível executar a aplicação com o PostgreSQL do Testcontainers e o
 perfil `test` por meio de `TestAtivaflowApiApplication`:
