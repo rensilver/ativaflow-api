@@ -85,6 +85,45 @@ instantes, compatíveis com `Instant` e exposição em UTC. O padrão de `update
 vale apenas para inserções; a aplicação deverá atualizá-lo a cada alteração,
 sem trigger no banco. O controle de transições de status também caberá ao domínio.
 
+A migração `V2__add_activation_request_owner_and_processing_metadata.sql`
+adiciona os campos internos abaixo, preservando a V1 e o contrato público:
+
+| Coluna interna | Tipo e finalidade |
+| --- | --- |
+| `consumer_id` | `VARCHAR(100)`, obrigatório, sem padrão; rejeita texto vazio ou composto apenas por espaços em branco. Identifica o consumidor proprietário da solicitação. |
+| `version` | `BIGINT`, obrigatório, padrão `0`, não negativo; reservado para controle de concorrência otimista com `@Version`. |
+| `attempt_count` | `INTEGER`, obrigatório, padrão `0`, não negativo; quantidade de tentativas de envio ao provedor. |
+| `next_attempt_at` | `TIMESTAMP WITH TIME ZONE`, opcional; instante da próxima tentativa, quando houver retry agendado. |
+| `lease_until` | `TIMESTAMP WITH TIME ZONE`, opcional; vencimento da posse temporária do processamento. |
+| `claimed_by` | `VARCHAR(100)`, opcional; identificador da instância/worker que assumiu o trabalho. |
+| `last_error_code` | `VARCHAR(100)`, opcional; código categorizado da última falha, sem payload, credenciais ou resposta bruta do provedor. |
+| `reconciliation_required` | `BOOLEAN`, obrigatório, padrão `false`; indica resultado externo indeterminado que exige reconciliação. |
+
+`consumer_id` é diferente de `customer_id`: o primeiro identifica o sistema
+consumidor autenticado; o segundo identifica o cliente informado no pedido.
+A derivação de `consumer_id` da identidade confiável do JWT (por exemplo,
+`client_id`) será implementada na etapa de autenticação. Ele não poderá ser
+aceito do payload. Os DTOs públicos deverão aceitar apenas `externalId`,
+`customerId` e `productCode` na criação e expor apenas `id`, `externalId`,
+`customerId`, `productCode`, `status`, `createdAt` e `updatedAt` nas respostas.
+Nenhuma das oito colunas internas deverá ser exposta na API.
+
+Esta entrega implementa somente o schema, seus testes e esta documentação.
+Autenticação, entidades/DTOs, controle otimista, worker, retries, lease e
+reconciliação ainda estão pendentes. Os campos opcionais começam nulos; a
+sinalização de reconciliação permitirá manter um resultado ambíguo em
+`PROCESSING`, sem adicionar estados públicos. O limite de tentativas será
+aplicado pelo processamento; a constraint do banco impede somente contagens
+negativas. A unicidade de `external_id` continua global, inclusive entre
+consumidores. Índices para consultas/claim serão definidos quando essas
+operações forem implementadas.
+
+A V2 pressupõe a tabela `activation_requests` vazia, conforme o cenário atual
+de desenvolvimento. Não há proprietário padrão nem backfill inferido de
+`customer_id` ou `external_id`. Se a V1 tiver registros, a adição de
+`consumer_id NOT NULL` falhará: será necessário planejar a atribuição dos
+proprietários antes de aplicar essa migração a um banco com dados.
+
 Os diretórios `infra/wiremock/mappings/`,
 `infra/wiremock/__files/` e `docs/adr/` também estão preparados, sem conteúdo além
 dos arquivos `.gitkeep`.
@@ -156,9 +195,11 @@ perfil `test`. `TestcontainersConfiguration` disponibiliza PostgreSQL com a
 imagem `postgres:17-alpine`, sem depender do banco ou das credenciais locais.
 `RestClientWireMockTests` verifica uma chamada HTTP com `RestClient` e um
 servidor WireMock iniciado pelo próprio teste.
-`FlywayMigrationTests` verifica a aplicação e validação da migração inicial,
-persistência dos campos e valores padrão, unicidade global de `external_id`
-e rejeição de status desconhecido no PostgreSQL real.
+`FlywayMigrationTests` verifica a aplicação e validação das migrações V1 e V2,
+persistência dos campos públicos e internos, valores padrão, obrigatoriedade
+de proprietário não vazio, rejeição de contadores negativos, unicidade global
+de `external_id` entre consumidores e rejeição de status desconhecido no
+PostgreSQL real.
 
 Também é possível executar a aplicação com o PostgreSQL do Testcontainers e o
 perfil `test` por meio de `TestAtivaflowApiApplication`:

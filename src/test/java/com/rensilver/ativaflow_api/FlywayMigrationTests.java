@@ -5,6 +5,9 @@ import java.util.UUID;
 
 import org.flywaydb.core.Flyway;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.NullAndEmptySource;
+import org.junit.jupiter.params.provider.ValueSource;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.context.annotation.Import;
@@ -29,9 +32,83 @@ class FlywayMigrationTests {
 	private JdbcTemplate jdbcTemplate;
 
 	@Test
-	void appliesInitialMigration() {
+	void storesConsumerAndDefaultsForInternalProcessingFields() {
+		UUID id = UUID.randomUUID();
+		jdbcTemplate.update("""
+				INSERT INTO activation_requests (id, external_id, customer_id, product_code, consumer_id)
+				VALUES (?, 'EXT-INTERNAL', 'CUST-1', 'PRODUCT-1', 'consumer-a')
+				""", id);
+
+		jdbcTemplate.queryForObject("SELECT * FROM activation_requests WHERE id = ?", (rs, rowNum) -> {
+			assertThat(rs.getString("consumer_id")).isEqualTo("consumer-a");
+			assertThat(rs.getObject("version", Long.class)).isZero();
+			assertThat(rs.getObject("attempt_count", Integer.class)).isZero();
+			assertThat(rs.getObject("next_attempt_at")).isNull();
+			assertThat(rs.getObject("lease_until")).isNull();
+			assertThat(rs.getString("claimed_by")).isNull();
+			assertThat(rs.getString("last_error_code")).isNull();
+			assertThat(rs.getObject("reconciliation_required", Boolean.class)).isFalse();
+			return id;
+		}, id);
+	}
+
+	@Test
+	void storesProcessingMetadataWithoutChangingPublicStates() {
+		UUID id = UUID.randomUUID();
+		OffsetDateTime nextAttemptAt = OffsetDateTime.parse("2026-10-28T18:00:00-03:00");
+		OffsetDateTime leaseUntil = nextAttemptAt.plusMinutes(1);
+		jdbcTemplate.update("""
+				INSERT INTO activation_requests
+				    (id, external_id, customer_id, product_code, consumer_id, status, version,
+				     attempt_count, next_attempt_at, lease_until, claimed_by, last_error_code,
+				     reconciliation_required)
+				VALUES (?, 'EXT-PROCESSING', 'CUST-1', 'PRODUCT-1', 'consumer-a', 'PROCESSING',
+				        2, 1, ?, ?, 'worker-1', 'PROVIDER_TIMEOUT', true)
+				""", id, nextAttemptAt, leaseUntil);
+
+		jdbcTemplate.queryForObject("SELECT * FROM activation_requests WHERE id = ?", (rs, rowNum) -> {
+			assertThat(rs.getString("status")).isEqualTo("PROCESSING");
+			assertThat(rs.getLong("version")).isEqualTo(2);
+			assertThat(rs.getInt("attempt_count")).isEqualTo(1);
+			assertThat(rs.getObject("next_attempt_at", OffsetDateTime.class).toInstant())
+					.isEqualTo(nextAttemptAt.toInstant());
+			assertThat(rs.getObject("lease_until", OffsetDateTime.class).toInstant())
+					.isEqualTo(leaseUntil.toInstant());
+			assertThat(rs.getString("claimed_by")).isEqualTo("worker-1");
+			assertThat(rs.getString("last_error_code")).isEqualTo("PROVIDER_TIMEOUT");
+			assertThat(rs.getBoolean("reconciliation_required")).isTrue();
+			return id;
+		}, id);
+	}
+
+	@ParameterizedTest
+	@NullAndEmptySource
+	@ValueSource(strings = {"   ", "\t\n"})
+	void rejectsMissingOrBlankConsumer(String consumerId) {
+		assertThatThrownBy(() -> jdbcTemplate.update("""
+				INSERT INTO activation_requests (id, external_id, customer_id, product_code, consumer_id)
+				VALUES (?, 'EXT-NO-OWNER', 'CUST-1', 'PRODUCT-1', ?)
+				""", UUID.randomUUID(), consumerId))
+				.isInstanceOf(DataIntegrityViolationException.class)
+				.hasMessageContaining("consumer_id");
+	}
+
+	@ParameterizedTest
+	@ValueSource(strings = {"version", "attempt_count"})
+	void rejectsNegativeProcessingCounters(String column) {
+		assertThatThrownBy(() -> jdbcTemplate.update("""
+				INSERT INTO activation_requests (id, external_id, customer_id, product_code, consumer_id, %s)
+				VALUES (?, 'EXT-NEGATIVE', 'CUST-1', 'PRODUCT-1', 'consumer-a', -1)
+				""".formatted(column), UUID.randomUUID()))
+				.isInstanceOf(DataIntegrityViolationException.class)
+				.hasMessageContaining("ck_activation_requests_" + column);
+	}
+
+	@Test
+	void appliesAndValidatesAllMigrations() {
 		assertThat(flyway.info().applied())
-				.anySatisfy(migration -> assertThat(migration.getVersion().getVersion()).isEqualTo("1"));
+				.extracting(migration -> migration.getVersion().getVersion())
+				.containsExactly("1", "2");
 		assertThat(flyway.info().pending()).isEmpty();
 		assertThat(flyway.validateWithResult().validationSuccessful).isTrue();
 	}
@@ -40,8 +117,8 @@ class FlywayMigrationTests {
 	void storesRequestWithUuidAndDefaultsForStatusAndTimestamps() {
 		UUID id = UUID.randomUUID();
 		jdbcTemplate.update("""
-				INSERT INTO activation_requests (id, external_id, customer_id, product_code)
-				VALUES (?, ?, ?, ?)
+				INSERT INTO activation_requests (id, external_id, customer_id, product_code, consumer_id)
+				VALUES (?, ?, ?, ?, 'consumer-a')
 				""", id, "EXT-12345", "CUST-10001", "INTERNET-500");
 
 		jdbcTemplate.queryForObject("SELECT * FROM activation_requests WHERE id = ?", (rs, rowNum) -> {
@@ -59,15 +136,15 @@ class FlywayMigrationTests {
 	}
 
 	@Test
-	void rejectsDuplicateExternalIdAcrossCustomersAndProducts() {
+	void rejectsDuplicateExternalIdAcrossConsumersCustomersAndProducts() {
 		jdbcTemplate.update("""
-				INSERT INTO activation_requests (id, external_id, customer_id, product_code)
-				VALUES (?, 'EXT-DUPLICATE', 'CUST-1', 'PRODUCT-1')
+				INSERT INTO activation_requests (id, external_id, customer_id, product_code, consumer_id)
+				VALUES (?, 'EXT-DUPLICATE', 'CUST-1', 'PRODUCT-1', 'consumer-a')
 				""", UUID.randomUUID());
 
 		assertThatThrownBy(() -> jdbcTemplate.update("""
-				INSERT INTO activation_requests (id, external_id, customer_id, product_code)
-				VALUES (?, 'EXT-DUPLICATE', 'CUST-2', 'PRODUCT-2')
+				INSERT INTO activation_requests (id, external_id, customer_id, product_code, consumer_id)
+				VALUES (?, 'EXT-DUPLICATE', 'CUST-2', 'PRODUCT-2', 'consumer-b')
 				""", UUID.randomUUID()))
 				.isInstanceOf(DataIntegrityViolationException.class)
 				.hasMessageContaining("uk_activation_requests_external_id");
@@ -76,8 +153,8 @@ class FlywayMigrationTests {
 	@Test
 	void rejectsUnknownStatus() {
 		assertThatThrownBy(() -> jdbcTemplate.update("""
-				INSERT INTO activation_requests (id, external_id, customer_id, product_code, status)
-				VALUES (?, 'EXT-INVALID', 'CUST-1', 'PRODUCT-1', 'UNKNOWN')
+				INSERT INTO activation_requests (id, external_id, customer_id, product_code, consumer_id, status)
+				VALUES (?, 'EXT-INVALID', 'CUST-1', 'PRODUCT-1', 'consumer-a', 'UNKNOWN')
 				""", UUID.randomUUID()))
 				.isInstanceOf(DataIntegrityViolationException.class)
 				.hasMessageContaining("ck_activation_requests_status");
