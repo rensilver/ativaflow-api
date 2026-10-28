@@ -2,6 +2,7 @@ package com.rensilver.ativaflow_api.dto.request;
 
 import java.util.stream.Stream;
 
+import com.rensilver.ativaflow_api.model.ActivationRequest;
 import jakarta.validation.Validation;
 import jakarta.validation.Validator;
 import jakarta.validation.ValidatorFactory;
@@ -60,17 +61,24 @@ class CreateActivationRequestTests {
 
 	@ParameterizedTest
 	@MethodSource("validText")
-	void acceptsNonBlankIdentifiersUpToColumnLimit(String value) {
+	void acceptsNonBlankIdentifiersUpToLimitWithoutNormalizingThem(String value) {
 		var request = new CreateActivationRequest(value, value, value);
 
 		assertThat(validator.validate(request)).isEmpty();
+		var entity = new ActivationRequest(request.externalId(), request.customerId(), request.productCode(), "consumer-a");
+		assertThat(entity.getExternalId()).isEqualTo(value);
+		assertThat(entity.getCustomerId()).isEqualTo(value);
+		assertThat(entity.getProductCode()).isEqualTo(value);
 	}
 
 	private static Stream<String> invalidText() {
-		return Stream.of(null, "", "   ", "\t\n", "a".repeat(101));
+		return Stream.of(null, "", "   ", "\t\n", "\u2003", "\u2003\t\n", "\u3000",
+				"a".repeat(101), "a".repeat(99) + "🚀");
 	}
 
 	private static Stream<String> validText() {
-		return Stream.of("a", "EXT-12345", "a".repeat(100), " " + "a".repeat(98) + " ");
+		return Stream.of("a", "EXT-12345", "a".repeat(99), "a".repeat(100),
+				" " + "a".repeat(98) + " ", "cliente / ação:AbC-42", "a".repeat(98) + "🚀",
+				"\u2003id\u3000");
 	}
 }

@@ -46,7 +46,7 @@ class ActivationRequestTests {
 
 	@ParameterizedTest
 	@NullAndEmptySource
-	@ValueSource(strings = {"   ", "\t\n"})
+	@ValueSource(strings = {"   ", "\t\n", "\u2003", "\u2003\t\n", "\u3000"})
 	void rejectsMissingOrBlankCreationFields(String invalid) {
 		assertThatThrownBy(() -> new ActivationRequest(invalid, "CUSTOMER-1", "PRODUCT-1", "consumer-a"))
 				.isInstanceOf(IllegalArgumentException.class);
@@ -113,7 +113,7 @@ class ActivationRequestTests {
 
 	@ParameterizedTest
 	@NullAndEmptySource
-	@ValueSource(strings = {"   ", "\t\n"})
+	@ValueSource(strings = {"   ", "\t\n", "\u2003", "\u2003\t\n", "\u3000"})
 	void rejectsMissingFailureCodeWithoutChangingState(String invalid) {
 		ActivationRequest request = newRequest();
 		request.startProcessing();

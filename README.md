@@ -176,10 +176,39 @@ dos arquivos `.gitkeep`.
 ## Contratos de entrada e saída
 
 `dto.request.CreateActivationRequest` é um record com os campos `externalId`,
-`customerId` e `productCode`. Cada campo usa `@NotBlank` e `@Size(max = 100)`:
-valores nulos, vazios, compostos apenas por espaços em branco ou com mais de
-100 caracteres são inválidos. Os identificadores são preservados sem trim
-ou outra normalização, em conformidade com a entidade e as colunas do banco.
+`customerId` e `productCode`.
+
+| Campo | Obrigatoriedade | Tamanho máximo | Formato |
+| --- | --- | --- | --- |
+| `externalId` | Texto não nulo, não vazio e não composto somente por espaços em branco. | 100 | Identificador textual, sem padrão adicional. |
+| `customerId` | Texto não nulo, não vazio e não composto somente por espaços em branco. | 100 | Identificador textual, sem padrão adicional. |
+| `productCode` | Texto não nulo, não vazio e não composto somente por espaços em branco. | 100 | Identificador textual, sem padrão adicional. |
+
+O teto de 100 é uma decisão técnica baseada nas colunas `VARCHAR(100)` existentes,
+não uma exigência de negócio ou do provedor. Não há tamanho mínimo adicional:
+um único caractere que não seja espaço em branco é suficiente. Não se exige UUID,
+CPF/CNPJ, conteúdo apenas numérico, prefixo ou consulta a um catálogo de produtos.
+Letras acentuadas, pontuação e espaços junto de texto são aceitos.
+
+`@NotBlankText` usa `String.isBlank()`, assim como o construtor da entidade:
+rejeita texto formado somente por caracteres reconhecidos por
+`Character.isWhitespace`, incluindo tabulação, quebra de linha, U+2003 e U+3000.
+A constraint própria evita a diferença do `@NotBlank` no Hibernate Validator 8,
+que usa `String.trim()` e aceita esses dois espaços Unicode. Ela não normaliza
+o valor nem impõe um formato aos identificadores.
+
+`@Size(max = 100)` e a entidade medem o tamanho com `String.length()`, em unidades
+UTF-16, incluindo os espaços. Por exemplo, `"a"` repetido 100 vezes é válido;
+101 vezes é inválido. Um emoji fora do plano básico Unicode, como `🚀`, ocupa
+duas unidades desse limite. O PostgreSQL conta caracteres Unicode em `VARCHAR`,
+portanto a validação Java pode ser mais restritiva para esses caracteres.
+
+Os identificadores são preservados sem trim, conversão entre maiúsculas e
+minúsculas ou outra normalização. Por exemplo, `" EXT-12345 "` conserva os
+espaços e eles contam para o limite. Os valores `"EXT-12345"` e `"ext-12345"`
+também são preservados como recebidos. A unicidade de `externalId` é uma regra
+separada, garantida pela constraint do banco; a validação do DTO não consulta
+duplicidades, existência de cliente ou disponibilidade do produto.
 
 ```json
 {
@@ -301,7 +330,9 @@ de `external_id` entre consumidores e rejeição de status desconhecido no
 PostgreSQL real.
 `ActivationRequestTests` verifica criação, validações, encapsulamento e transições
 de estado. `CreateActivationRequestTests` usa o validador Jakarta real para
-verificar obrigatoriedade e limites dos três campos, sem banco ou contexto Spring.
+verificar obrigatoriedade (inclusive espaços Unicode), limites de 99/100/101
+unidades UTF-16 e preservação dos três identificadores na criação da entidade,
+sem banco ou contexto Spring.
 `ActivationDtosJsonTests` usa `@JsonTest` para verificar leitura/escrita do payload,
 preservação dos identificadores e serialização exclusiva dos sete campos públicos,
 incluindo os quatro status e datas UTC, sem depender de Docker.
