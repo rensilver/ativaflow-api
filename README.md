@@ -13,6 +13,7 @@ As dependências e os plugins de build estão definidos no `pom.xml`:
 | Área | Componentes |
 | --- | --- |
 | API HTTP | Spring Web e Bean Validation |
+| Documentação da API | Springdoc OpenAPI e Swagger UI |
 | Persistência | Spring Data JPA, PostgreSQL e Flyway |
 | Segurança | Spring Security e OAuth2 Resource Server |
 | Monitoramento | Spring Boot Actuator e Micrometer com registro Prometheus |
@@ -225,6 +226,31 @@ bash ./mvnw spring-boot:run
 
 Os arquivos `.env` locais são ignorados pelo Git; `.env.example` é versionado.
 
+## Documentação OpenAPI e Swagger UI
+
+Com a aplicação em execução na porta padrão, acesse:
+
+| Recurso | URL |
+| --- | --- |
+| Swagger UI | http://localhost:8080/swagger-ui.html |
+| OpenAPI JSON | http://localhost:8080/v3/api-docs |
+| OpenAPI YAML | http://localhost:8080/v3/api-docs.yaml |
+
+A integração usa `springdoc-openapi-starter-webmvc-ui` 2.10.0, compatível com
+Spring Boot 3.5.x. `OpenApiConfiguration` define título, descrição e versão
+`v1` do contrato da API. Se `SERVER_PORT` for alterada, ajuste a porta nas URLs.
+
+`SecurityConfiguration` permite acesso sem autenticação às rotas da documentação
+e mantém o health check público e a exigência de autenticação nas demais rotas.
+Os mecanismos padrão de login, HTTP Basic e proteção CSRF do Spring Security
+continuam habilitados; a autenticação JWT ainda será implementada.
+A documentação fica disponível em todos os perfis. Para desativá-la, configure
+`SPRINGDOC_API_DOCS_ENABLED=false` e `SPRINGDOC_SWAGGER_UI_ENABLED=false`.
+
+Os controllers REST serão documentados automaticamente quando implementados.
+Como ainda não há endpoints de negócio, a interface inicialmente não lista
+operações de ativação. As entidades JPA não são expostas pela documentação.
+
 ## Testes e integração contínua
 
 Para executar o build e os testes:
@@ -234,7 +260,9 @@ bash ./mvnw -B --no-transfer-progress verify
 ```
 
 O teste `AtivaflowApiApplicationTests` verifica a inicialização do contexto com o
-perfil `test`. `TestcontainersConfiguration` disponibiliza PostgreSQL com a
+perfil `test`, o acesso anônimo ao Swagger UI e seus recursos, os documentos
+OpenAPI, os metadados da API e a preservação das regras de acesso às demais rotas
+e ao health check. `TestcontainersConfiguration` disponibiliza PostgreSQL com a
 imagem `postgres:17-alpine`, sem depender do banco ou das credenciais locais.
 `RestClientWireMockTests` verifica uma chamada HTTP com `RestClient` e um
 servidor WireMock iniciado pelo próprio teste.
