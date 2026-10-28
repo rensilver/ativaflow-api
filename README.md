@@ -55,7 +55,7 @@ Pacote base: `com.rensilver.ativaflow_api`.
 | `pom.xml` | Dependências, versão do Java, plugins e processadores de anotações. |
 | `mvnw` e `mvnw.cmd` | Execução do Maven Wrapper em Unix e Windows. |
 | `.mvn/wrapper/maven-wrapper.properties` | Versão e distribuição do Maven utilizadas pelo Wrapper. |
-| `src/main/resources/application.yaml` | Configuração compartilhada: porta, JPA, pool de conexões, timeouts HTTP e desligamento gracioso. |
+| `src/main/resources/application.yaml` | Configuração compartilhada: porta, Flyway, JPA, pool de conexões, timeouts HTTP e desligamento gracioso. |
 | `src/main/resources/application-local.yaml` | Conexão com PostgreSQL e URL do provedor no ambiente local. |
 | `src/main/resources/application-prod.yaml` | Configuração por variáveis de ambiente e desativação do DevTools em produção. |
 | `src/test/resources/application-test.yaml` | Configuração do provedor para o perfil de testes. |
@@ -65,7 +65,19 @@ Pacote base: `com.rensilver.ativaflow_api`.
 | `.gitattributes` | Padronização de finais de linha dos scripts do Maven Wrapper. |
 
 O Hibernate está configurado com `ddl-auto: validate` e `open-in-view: false`.
-O Flyway aplica as migrações de `src/main/resources/db/migration/` na inicialização.
+O Flyway está habilitado explicitamente na configuração compartilhada e aplica
+as migrações de `classpath:db/migration` na inicialização, antes da validação do
+Hibernate. Com `validate-on-migrate: true`, divergências no histórico de migrações,
+como checksums alterados, impedem a inicialização. O Hibernate apenas valida os
+mapeamentos JPA contra o schema; alterações de estrutura devem ser feitas por
+novas migrações. Com `open-in-view: false`, o contexto de persistência não permanece
+aberto durante toda a requisição HTTP; o carregamento de associações lazy deve
+ocorrer dentro da transação da aplicação.
+
+O `baseline-on-migrate: false` impede a criação automática de um baseline em um
+schema não vazio sem histórico Flyway. Bancos existentes nessa condição precisam
+de uma estratégia explícita de adoção antes de iniciar a aplicação.
+
 A migração `V1__create_activation_requests.sql` cria a tabela `activation_requests`:
 
 | Coluna | Tipo e regras |
