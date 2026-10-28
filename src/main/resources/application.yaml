@@ -1,3 +1,26 @@
 spring:
   application:
     name: ativaflow-api
+  datasource:
+    hikari:
+      # HikariCP recebe este timeout em milissegundos.
+      connection-timeout: ${DB_CONNECTION_TIMEOUT_MS:30000}
+  jpa:
+    open-in-view: false
+    hibernate:
+      ddl-auto: validate
+  http:
+    client:
+      connect-timeout: ${ACTIVATION_PROVIDER_CONNECT_TIMEOUT:2s}
+      read-timeout: ${ACTIVATION_PROVIDER_READ_TIMEOUT:5s}
+  lifecycle:
+    timeout-per-shutdown-phase: ${SHUTDOWN_TIMEOUT:30s}
+
+server:
+  port: ${SERVER_PORT:8080}
+  shutdown: graceful
+
+app:
+  activation-provider:
+    # Reserva de configuração; a autenticação depende do contrato do provedor.
+    api-key: ${ACTIVATION_PROVIDER_API_KEY:}

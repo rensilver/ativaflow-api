@@ -1,0 +1,5 @@
+# PostgreSQL e credenciais são fornecidos por @ServiceConnection.
+app:
+  activation-provider:
+    # Porta reservada para testes; testes HTTP devem sobrescrever com o WireMock.
+    base-url: http://localhost:1
