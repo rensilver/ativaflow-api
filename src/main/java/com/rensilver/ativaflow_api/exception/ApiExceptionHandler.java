@@ -1,5 +1,6 @@
 package com.rensilver.ativaflow_api.exception;
 
+import java.net.URI;
 import java.util.List;
 import java.util.UUID;
 
@@ -20,18 +21,23 @@ import org.springframework.validation.FieldError;
 import org.springframework.validation.ObjectError;
 import org.springframework.validation.method.ParameterErrors;
 import org.springframework.web.bind.annotation.ExceptionHandler;
+import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestControllerAdvice;
 import org.springframework.web.bind.MethodArgumentNotValidException;
+import org.springframework.web.bind.MissingServletRequestParameterException;
 import org.springframework.web.context.request.ServletWebRequest;
 import org.springframework.web.context.request.WebRequest;
 import org.springframework.web.method.annotation.HandlerMethodValidationException;
+import org.springframework.web.method.annotation.MethodArgumentTypeMismatchException;
 import org.springframework.web.servlet.mvc.method.annotation.ResponseEntityExceptionHandler;
 
 /** Traduz falhas da API e do MVC em respostas públicas seguras e correlacionadas. */
 @Slf4j
 @RestControllerAdvice
 public class ApiExceptionHandler extends ResponseEntityExceptionHandler {
+
+	private static final URI VALIDATION_ERROR_TYPE = URI.create("urn:ativaflow:problem:validation-error");
 
 	@ExceptionHandler(ActivationRequestConflictException.class)
 	public ResponseEntity<Object> handleConflict(ActivationRequestConflictException exception, WebRequest request) {
@@ -70,6 +76,7 @@ public class ApiExceptionHandler extends ResponseEntityExceptionHandler {
 		if (status.value() == HttpStatus.BAD_REQUEST.value()) {
 			List<ValidationError> errors = validationErrors(exception);
 			if (!errors.isEmpty()) {
+				problem.setType(VALIDATION_ERROR_TYPE);
 				problem.setProperty("errors", errors);
 			}
 		}
@@ -101,6 +108,7 @@ public class ApiExceptionHandler extends ResponseEntityExceptionHandler {
 			case MethodArgumentNotValidException ignored -> "Request validation failed";
 			case HandlerMethodValidationException ignored -> "Invalid request parameters";
 			case TypeMismatchException ignored -> "Invalid request parameters";
+			case MissingServletRequestParameterException ignored -> "Invalid request parameters";
 			case InvalidPaginationException ignored -> "Invalid request parameters";
 			default -> ApiProblemDetails.title(status);
 		};
@@ -117,11 +125,22 @@ public class ApiExceptionHandler extends ResponseEntityExceptionHandler {
 				}
 				var parameter = result.getMethodParameter();
 				var requestParam = parameter.getParameterAnnotation(RequestParam.class);
+				var pathVariable = parameter.getParameterAnnotation(PathVariable.class);
 				String field = requestParam != null && !requestParam.name().isEmpty()
 						? requestParam.name() : parameter.getParameterName();
+				if (pathVariable != null && !pathVariable.name().isEmpty()) {
+					field = pathVariable.name();
+				}
+				String publicField = field != null ? field : "request";
 				return result.getResolvableErrors().stream().map(error ->
-						new ValidationError(field != null ? field : "request", safeValidationMessage(error.getDefaultMessage())));
+						new ValidationError(publicField, safeValidationMessage(error.getDefaultMessage())));
 			}).toList();
+		}
+		if (exception instanceof MethodArgumentTypeMismatchException mismatch) {
+			return List.of(new ValidationError(mismatch.getName(), "Invalid value"));
+		}
+		if (exception instanceof MissingServletRequestParameterException missing) {
+			return List.of(new ValidationError(missing.getParameterName(), "Required parameter is missing"));
 		}
 		return List.of();
 	}

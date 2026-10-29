@@ -116,7 +116,7 @@ class ApiExceptionHandlerUnitTests {
 		String secret = "sensitive-value-".repeat(10);
 		problem(post(PATH).contentType(MediaType.APPLICATION_JSON).content("""
 				{"externalId":"%s","customerId":" ","productCode":null}
-				""".formatted(secret)), 400, "Bad Request", PATH)
+				""".formatted(secret)), 400, "Bad Request", PATH, "urn:ativaflow:problem:validation-error")
 				.andExpect(jsonPath("$.errors.length()").value(3))
 				.andExpect(jsonPath("$.errors[*].field", containsInAnyOrder("externalId", "customerId", "productCode")))
 				.andExpect(jsonPath("$.errors[0].message").isNotEmpty())
@@ -128,7 +128,8 @@ class ApiExceptionHandlerUnitTests {
 	@ValueSource(strings = {"page=-1", "size=0", "size=101", "customerId= "})
 	void reportsInvalidQueryParameterByName(String query) throws Exception {
 		String field = query.substring(0, query.indexOf('='));
-		problem(get(PATH).queryParam(field, query.substring(query.indexOf('=') + 1)), 400, "Bad Request", PATH)
+		problem(get(PATH).queryParam(field, query.substring(query.indexOf('=') + 1)), 400, "Bad Request", PATH,
+				"urn:ativaflow:problem:validation-error")
 				.andExpect(jsonPath("$.errors[0].field").value(field))
 				.andExpect(jsonPath("$.errors[0].message").isNotEmpty());
 	}
@@ -137,7 +138,7 @@ class ApiExceptionHandlerUnitTests {
 	@ValueSource(strings = {"?page=secret", "?status=secret", "/secret"})
 	void rejectsTypeMismatchesWithSafeDetails(String suffix) throws Exception {
 		String path = suffix.startsWith("?") ? PATH : PATH + suffix;
-		problem(get(PATH + suffix), 400, "Bad Request", path)
+		problem(get(PATH + suffix), 400, "Bad Request", path, "urn:ativaflow:problem:validation-error")
 				.andExpect(jsonPath("$.detail").value("Invalid request parameters"));
 	}
 
@@ -257,11 +258,16 @@ class ApiExceptionHandlerUnitTests {
 
 	private ResultActions problem(MockHttpServletRequestBuilder request, int expectedStatus, String title, String path)
 			throws Exception {
+		return problem(request, expectedStatus, title, path, "about:blank");
+	}
+
+	private ResultActions problem(MockHttpServletRequestBuilder request, int expectedStatus, String title, String path,
+			String type) throws Exception {
 		return mvc.perform(request.principal(() -> "consumer").header("X-Correlation-ID", CORRELATION))
 				.andExpect(status().is(expectedStatus))
 				.andExpect(content().contentTypeCompatibleWith(MediaType.APPLICATION_PROBLEM_JSON))
 				.andExpect(header().string("X-Correlation-ID", CORRELATION))
-				.andExpect(jsonPath("$.type").value("about:blank"))
+				.andExpect(jsonPath("$.type").value(type))
 				.andExpect(jsonPath("$.title").value(title))
 				.andExpect(jsonPath("$.status").value(expectedStatus))
 				.andExpect(jsonPath("$.detail").isNotEmpty())

@@ -640,11 +640,15 @@ construtor do record.
 para centralizar exceções da aplicação e do Spring MVC. `ApiProblemDetails`
 centraliza a criação do corpo também usado pelos filtros de segurança.
 As respostas seguem [Problem Details (RFC 9457)](https://www.rfc-editor.org/rfc/rfc9457.html), com `Content-Type: application/problem+json`,
-`type: about:blank`, `title`, `status`, `detail` e `instance`. O campo
+`type`, `title`, `status`, `detail` e `instance`. O campo
 `correlationId` corresponde ao header `X-Correlation-ID` validado ou gerado pelo
 filtro existente; o mesmo identificador aparece no evento de log. `instance`
 contém apenas o caminho, sem os parâmetros da query string.
-`type: about:blank` identifica a semântica do status HTTP; `title` usa sua
+Erros de validação de entrada com campo identificado usam o tipo estável
+`urn:ativaflow:problem:validation-error`, independente da rota, do campo ou da
+mensagem. Essa URI identifica o contrato de validação e não depende de um domínio
+ou de uma página publicada. Os demais erros usam `type: about:blank`, que
+identifica a semântica do status HTTP; `title` usa sua
 descrição padrão. Para status sem constante em `HttpStatus`, o código numérico
 é preservado e o título usa `Request failed`.
 
@@ -652,7 +656,8 @@ descrição padrão. Para status sem constante em `HttpStatus`, o código numér
 | --- | --- | --- |
 | JSON inválido, ausente ou com propriedades desconhecidas | 400 | `Invalid request body`. |
 | Bean Validation no corpo ou nos parâmetros | 400 | Mensagem segura e `errors: [{field, message}]`, sem valores rejeitados. |
-| Tipo de parâmetro inválido ou paginação fora dos limites | 400 | `Invalid request parameters`. |
+| Tipo de parâmetro inválido ou parâmetro obrigatório ausente | 400 | `Invalid request parameters` e `errors: [{field, message}]`. |
+| Paginação fora dos limites suportados pelo serviço | 400 | `Invalid request parameters`. |
 | Autenticação ausente ou credenciais HTTP Basic inválidas | 401 | `Authentication is required`, com `WWW-Authenticate: Basic realm="Realm"`. |
 | Acesso negado ou rejeição de CSRF | 403 | `Access is denied`. |
 | Solicitação inexistente ou de outro consumidor | 404 | `Activation request not found`. |
@@ -660,11 +665,19 @@ descrição padrão. Para status sem constante em `HttpStatus`, o código numér
 | Outros erros do MVC, como método ou mídia incompatíveis | Status do MVC | Mensagem segura, preservando cabeçalhos como `Allow`. |
 | Falha inesperada ou validação do valor retornado pelo controller | 500 | `An unexpected error occurred`. |
 
-Erros de validação podem incluir, por exemplo:
+O array `errors` preserva todas as mensagens, inclusive quando um campo viola
+mais de uma restrição. `field` usa o nome público do campo ou parâmetro (incluindo
+aliases de `@RequestParam` e `@PathVariable`); erros globais do objeto usam
+`request`. Falhas de conversão de parâmetros usam a mensagem segura `Invalid value`,
+e parâmetros obrigatórios ausentes usam `Required parameter is missing`.
+JSON ilegível não recebe um campo inventado; validação de retorno do controller
+continua sendo uma falha interna 500, sem `errors`.
+
+Exemplo de erro de validação:
 
 ```json
 {
-  "type": "about:blank",
+  "type": "urn:ativaflow:problem:validation-error",
   "title": "Bad Request",
   "status": 400,
   "detail": "Request validation failed",
@@ -691,6 +704,14 @@ validação e serialização reais, sem Spring Boot, banco ou provedor externo:
 
 ```bash
 bash ./mvnw -Dtest=ApiExceptionHandlerUnitTests test
+```
+
+`ValidationProblemContractUnitTests` cobre o tipo estável, erros por campo no
+body, query e path, aliases, parâmetros obrigatórios, múltiplas mensagens e a
+correlação entre corpo, header e log. Para executar somente os testes dessa tarefa:
+
+```bash
+bash ./mvnw -Dtest=ValidationProblemContractUnitTests test
 ```
 
 Os testes adicionados para a padronização exercitam negociação de conteúdo,

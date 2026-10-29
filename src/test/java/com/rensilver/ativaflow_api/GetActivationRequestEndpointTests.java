@@ -98,7 +98,7 @@ class GetActivationRequestEndpointTests {
 		mockMvc.perform(get("/api/v1/requests/not-a-uuid").with(user(CONSUMER)))
 				.andExpect(status().isBadRequest())
 				.andExpect(content().contentTypeCompatibleWith(MediaType.APPLICATION_PROBLEM_JSON))
-				.andExpect(jsonPath("$.type").value("about:blank"))
+				.andExpect(jsonPath("$.type").value("urn:ativaflow:problem:validation-error"))
 				.andExpect(jsonPath("$.title").value("Bad Request"))
 				.andExpect(jsonPath("$.status").value(400))
 				.andExpect(jsonPath("$.detail").isString())
