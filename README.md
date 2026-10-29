@@ -69,6 +69,8 @@ de serviços está em [Responsabilidades dos serviços](docs/service-responsibil
 | `src/main/resources/application-prod.yaml` | Configuração por variáveis de ambiente e desativação do DevTools em produção. |
 | `src/test/resources/application-test.yaml` | Configuração do provedor para o perfil de testes. |
 | `.env.example` | Modelo de variáveis para execução local. |
+| `docker-compose.yaml` | Provedor simulado local com a imagem oficial do WireMock. |
+| `infra/wiremock/mappings/activation-success.json` | Mapping estático de sucesso: `POST /provider/v1/activate` retorna `204`, sem corpo. |
 | `.github/workflows/ci.yaml` | Build e testes no GitHub Actions. |
 | `.gitignore` | Exclusões de build, arquivos de IDE e configurações locais de ambiente. |
 | `.gitattributes` | Padronização de finais de linha dos scripts do Maven Wrapper. |
@@ -198,9 +200,9 @@ de desenvolvimento. Não há proprietário padrão nem backfill inferido de
 `consumer_id NOT NULL` falhará: será necessário planejar a atribuição dos
 proprietários antes de aplicar essa migração a um banco com dados.
 
-Os diretórios `infra/wiremock/mappings/` e `infra/wiremock/__files/` também estão
-preparados, sem conteúdo além dos arquivos `.gitkeep`. As decisões técnicas
-estão em `docs/adr/`.
+O diretório `infra/wiremock/mappings/` contém o mapping padrão de sucesso do
+provedor simulado. `infra/wiremock/__files/` está reservado para arquivos de
+resposta, caso necessários. As decisões técnicas estão em `docs/adr/`.
 
 ## Aquisição atômica pelo worker
 
@@ -404,8 +406,9 @@ por `ActivationProviderConfiguration`. `ActivationProviderProperties` vincula
 com credenciais, query ou fragmento. Um prefixo de caminho na URL base é preservado.
 O builder configurado pelo Spring Boot é utilizado com transporte JDK e HTTP/1.1
 explícitos, sem redirecionamentos automáticos. O cliente executa uma única
-tentativa e não persiste nem altera estados. Metadados de correlação, mappings WireMock para
-demonstração e worker continuam pendentes.
+tentativa e não persiste nem altera estados. O mapping WireMock de sucesso está
+disponível no Compose para demonstração local. Metadados de correlação e worker
+continuam pendentes.
 
 A chamada envia `Content-Type: application/json` e apenas os três valores
 persistidos, sem normalização:
@@ -896,6 +899,50 @@ bash ./mvnw spring-boot:run
 ```
 
 Os arquivos `.env` locais são ignorados pelo Git; `.env.example` é versionado.
+
+### Provedor simulado no Compose
+
+Com Docker Engine e Docker Compose disponíveis, execute na raiz do repositório:
+
+```bash
+docker compose up -d activation-provider-mock
+docker compose ps activation-provider-mock
+```
+
+O serviço usa a imagem oficial `wiremock/wiremock:3.13.2`, com versão fixa e
+diretórios `mappings` e `__files` montados somente para leitura, conforme a
+[documentação do WireMock](https://wiremock.org/docs/standalone/docker/).
+A porta é publicada apenas em `127.0.0.1:8081`, restringindo o acesso externo
+ao mock e à sua API administrativa.
+
+Para a API executada na máquina com o perfil `local`, mantenha
+`ACTIVATION_PROVIDER_BASE_URL=http://localhost:8081`, como em `.env.example`.
+Outros containers na mesma rede do Compose devem usar
+`http://activation-provider-mock:8080`. Nesta etapa, o Compose contém apenas o
+mock; a aplicação e o PostgreSQL continuam com a execução local descrita acima.
+
+Após a inicialização do WireMock, confira diretamente o contrato simulado:
+
+```bash
+curl -i --request POST 'http://localhost:8081/provider/v1/activate' \
+  --header 'Content-Type: application/json' \
+  --data '{"externalId":"EXT-12345","customerId":"CUST-10001","productCode":"INTERNET-500"}'
+```
+
+O retorno esperado é `204 No Content`, sem corpo. O único mapping padrão é
+`infra/wiremock/mappings/activation-success.json`; não há seletor de cenários na
+API. Erros e timeouts são configurados pelo próprio WireMock dos testes, em
+instâncias isoladas com portas dinâmicas, sem depender deste container.
+O worker ainda está pendente; criar uma solicitação na API não chama o mock.
+
+Após editar um mapping, reinicie o serviço para recarregá-lo. Para consultar
+logs ou encerrar o ambiente:
+
+```bash
+docker compose restart activation-provider-mock
+docker compose logs --tail=100 activation-provider-mock
+docker compose down
+```
 
 ## Documentação OpenAPI e Swagger UI
 
