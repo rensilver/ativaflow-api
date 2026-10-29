@@ -435,6 +435,43 @@ válida do contexto atual em `X-Correlation-ID`; não copia `Authorization`, coo
 ou o JWT do consumidor. A autenticação própria de um provedor real depende de
 contrato futuro.
 
+Os eventos de tentativa são emitidos em nível `INFO` com campos estruturados
+SLF4J, visíveis no formato padrão do Logback:
+
+| Evento (`event`) | Campos técnicos |
+| --- | --- |
+| `activation_attempt_started` | `correlationId`, `requestId` interno e `attempt` com o contador já persistido, antes de chamar o provedor. |
+| `activation_provider_attempt` | `correlationId`, `httpStatus`, `responseCategory`, `durationMs` e `result`, uma vez por chamada ao cliente HTTP. |
+| `activation_attempt_finished` | `correlationId`, `requestId`, `attempt`, `result` e `persistence`, após a tentativa de gravar o resultado. |
+
+`responseCategory` distingue `HTTP_2XX`, `HTTP_3XX`, `HTTP_4XX`, `HTTP_5XX`,
+`TIMEOUT`, `COMMUNICATION_FAILURE` e `UNEXPECTED_ERROR`. `httpStatus=0` indica
+que a chamada não retornou uma resposta HTTP utilizável. `durationMs` usa o
+relógio monotônico (`System.nanoTime`) e mede a chamada ao cliente, incluindo
+preparação/serialização e liberação da resposta; não inclui as transações do worker.
+Sem contexto válido, `correlationId` no evento HTTP é nulo.
+
+`result` representa `SUCCESS`, `PERMANENT_FAILURE`, `TRANSIENT_FAILURE` ou
+`INDETERMINATE`; exceções inesperadas usam `UNEXPECTED_ERROR` e continuam sendo
+propagadas. A categoria HTTP não determina sozinha o sucesso: por exemplo, HTTP
+202 permanece `INDETERMINATE`, conforme o contrato atual.
+`persistence` diferencia `RECORDED`, `STALE` (posse/versão já não permitem a
+escrita), `NOT_RECORDED` (falha antes da gravação) e `ERROR` (gravação lançou exceção).
+Um resultado HTTP `SUCCESS` só tem gravação confirmada quando o worker registra
+`persistence=RECORDED`.
+
+Os eventos usam uma lista explícita de campos técnicos: não incluem payloads,
+identificadores de negócio/cliente, headers, URLs, credenciais, códigos de erro
+livres, mensagens ou stack traces de exceções. Os eventos do worker e do cliente
+podem ser relacionados por `correlationId`. Os testes unitários
+`HttpActivationProviderLoggingTests` e `ActivationRequestWorkerLoggingTests`
+cobrem classificação, duração, identificação da tentativa, falhas de persistência
+e ausência de dados sensíveis. Para executar somente esses testes:
+
+```bash
+./mvnw -Dtest=HttpActivationProviderLoggingTests,ActivationRequestWorkerLoggingTests test
+```
+
 A chamada envia `Content-Type: application/json` e apenas os três valores
 persistidos, sem normalização:
 
