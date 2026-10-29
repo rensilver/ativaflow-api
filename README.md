@@ -363,6 +363,41 @@ sem ela, o chamador deve registrar resultado ambíguo e manter o bloqueio.
 A classificação de respostas e a interpretação do header continuam no escopo
 da futura integração HTTP. Nenhuma operação adiciona endpoint público.
 
+## Contrato mínimo de integração com o provedor
+
+O contrato de saída de `POST /provider/v1/activate` está definido na
+[ADR-0002 — Contrato mínimo de ativação no provedor](docs/adr/0002-contrato-minimo-provedor.md).
+O enunciado não fornece schema completo e não existe contrato oficial adicional;
+as decisões abaixo são suposições confirmadas para o projeto e seu mock.
+Cliente HTTP, DTOs de integração, mappings WireMock e worker continuam pendentes.
+
+A chamada envia `Content-Type: application/json` e apenas os três valores
+persistidos, sem normalização:
+
+```json
+{
+  "externalId": "EXT-12345",
+  "customerId": "CUST-10001",
+  "productCode": "INTERNET-500"
+}
+```
+
+O sucesso padrão é **`204 No Content`, sem corpo**, confirmando ativação concluída.
+Nenhum campo de resposta é obrigatório; não há schema de erro presumido.
+
+| Cenário | Tratamento definido para a futura integração |
+| --- | --- |
+| `204` (padrão), `200` ou `201` | Confirmam conclusão no contrato simulado: `COMPLETED`, sem retry; corpo dispensável. |
+| `202 Accepted` | Não confirma conclusão; `PROCESSING` com reconciliação, sem reenvio automático. |
+| `400` | No mock, rejeição permanente sem ativação: `FAILED`, sem retry. |
+| `500`, `429` ou `503` | **Somente no contrato do mock**, garantem não ativação: até três tentativas totais, com backoff, jitter e `Retry-After` válido; terceira falha segura encerra em `FAILED`. |
+| Timeout, resposta não contratada ou erro sem garantia de não ativação | `PROCESSING` com reconciliação, sem retry automático. |
+
+A garantia do mock não se transfere a um provedor real ao mudar a URL base.
+`externalId` não garante idempotência externa. O mock não exige autenticação;
+o mecanismo real precisa ser contratado, e o JWT do consumidor não é encaminhado.
+A ADR detalha campos, headers, `Retry-After`, limites e critérios futuros de teste.
+
 ## Contratos de entrada e saída
 
 `dto.request.CreateActivationRequest` é um record com os campos `externalId`,
