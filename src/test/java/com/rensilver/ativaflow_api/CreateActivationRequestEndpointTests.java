@@ -64,10 +64,10 @@ import static com.github.tomakehurst.wiremock.client.WireMock.aResponse;
 import static com.github.tomakehurst.wiremock.client.WireMock.request;
 import static com.github.tomakehurst.wiremock.client.WireMock.urlEqualTo;
 import static com.github.tomakehurst.wiremock.core.WireMockConfiguration.wireMockConfig;
+import static com.rensilver.ativaflow_api.support.RequestTestUsers.user;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.awaitility.Awaitility.await;
 import static org.springframework.security.test.web.servlet.request.SecurityMockMvcRequestPostProcessors.csrf;
-import static org.springframework.security.test.web.servlet.request.SecurityMockMvcRequestPostProcessors.user;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.content;
@@ -612,11 +612,11 @@ class CreateActivationRequestEndpointTests {
 	}
 
 	@Test
-	void preservesCsrfProtectionWithoutPersisting() throws Exception {
+	void authenticatedCreationDoesNotRequireCsrfToken() throws Exception {
 		mockMvc.perform(post(PATH).with(user(CONSUMER))
 				.contentType(MediaType.APPLICATION_JSON).content(PAYLOAD))
-				.andExpect(status().isForbidden());
-		assertThat(storedRequestCount()).isZero();
+				.andExpect(status().isCreated());
+		assertThat(storedRequestCount()).isEqualTo(1L);
 	}
 
 	@Nullable

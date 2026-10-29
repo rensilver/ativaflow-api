@@ -1,4 +1,12 @@
 # PostgreSQL e credenciais são fornecidos por @ServiceConnection.
+spring:
+  security:
+    oauth2:
+      resourceserver:
+        jwt:
+          # Decoder lazy: os testes existentes usam identidades simuladas, sem consultar este emissor.
+          issuer-uri: https://issuer.example.test
+
 app:
   worker:
     enabled: false
