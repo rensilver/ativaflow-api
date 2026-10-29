@@ -5,8 +5,10 @@ import java.util.List;
 import java.util.UUID;
 
 import com.rensilver.ativaflow_api.domain.ActivationStatus;
+import com.rensilver.ativaflow_api.model.ActivationRequest;
 import com.rensilver.ativaflow_api.repository.ActivationRequestRepository;
 import org.hibernate.resource.jdbc.spi.StatementInspector;
+import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.CsvSource;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -34,6 +36,20 @@ class ActivationRequestQueryTests {
 
 	@Autowired
 	private JdbcTemplate jdbcTemplate;
+
+	@Test
+	void externalIdLookupOnlyReturnsRecordsOwnedByTheAuthenticatedConsumer() {
+		var owned = repository.saveAndFlush(
+				ActivationRequest.create("EXT-OWNED", "CUSTOMER-1", "PRODUCT-1", "consumer-a"));
+		repository.saveAndFlush(
+				ActivationRequest.create("EXT-FOREIGN", "CUSTOMER-1", "PRODUCT-1", "consumer-b"));
+
+		assertThat(repository.findByExternalIdAndConsumerId("EXT-OWNED", "consumer-a"))
+				.contains(owned);
+		assertThat(repository.findByExternalIdAndConsumerId("EXT-FOREIGN", "consumer-a")).isEmpty();
+		assertThat(repository.findByExternalIdAndConsumerId("EXT-OWNED", "consumer-b")).isEmpty();
+		assertThat(repository.findByExternalIdAndConsumerId("EXT-MISSING", "consumer-a")).isEmpty();
+	}
 
 	@ParameterizedTest
 	@CsvSource({", , 9", "PENDING, , 6", ", CUSTOMER-1, 6", "PENDING, CUSTOMER-1, 3"})

@@ -320,12 +320,21 @@ diferenças entre maiúsculas e minúsculas também contam como divergência.
 A mesma resposta genérica é usada para colisões entre consumidores, mesmo
 quando cliente e produto coincidem, evitando revelar dados do registro existente.
 
-A consulta prévia evita inserções desnecessárias, mas não garante unicidade
-entre chamadas simultâneas. A inserção usa uma transação própria: se perder a
-disputa pela constraint `uk_activation_requests_external_id`, termina com
+A consulta prévia e a releitura após colisão filtram por `externalId` e pelo
+consumidor autenticado no PostgreSQL, sem carregar o registro de outro consumidor.
+A constraint mantém a unicidade global: se o identificador pertencer a outro
+consumidor, a inserção falha e a API responde o mesmo `409` genérico, sem dados
+do banco ou do registro alheio. Esse `409` informa que o identificador não está
+disponível, mas não identifica o proprietário nem confirma cliente, produto ou status.
+
+A consulta prévia evita inserções desnecessárias para o mesmo consumidor, mas
+não garante unicidade entre chamadas simultâneas. A inserção usa uma transação
+própria: se perder a disputa pela constraint `uk_activation_requests_external_id`, termina com
 rollback antes de uma nova consulta transacional ao registro confirmado.
-Aplicam-se então as mesmas regras de `200` ou `409`. Outras violações de
-integridade não são convertidas em repetição. Chamadas idênticas concorrentes
+Aplicam-se então as mesmas regras de `200` ou `409`. Se a releitura não encontrar
+um registro do consumidor autenticado, a resposta também será o `409` genérico,
+inclusive se a linha tiver sido removida entre a colisão e a releitura. Outras
+violações de integridade não são convertidas em repetição. Chamadas idênticas concorrentes
 produzem uma única linha, um `201` e `200` para as demais chamadas.
 
 Essa é a idempotência da API ao registrar trabalho. A idempotência da ativação

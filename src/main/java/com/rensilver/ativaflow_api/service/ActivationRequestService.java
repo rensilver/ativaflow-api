@@ -55,7 +55,7 @@ public class ActivationRequestService {
 
 	@Transactional(propagation = Propagation.NOT_SUPPORTED)
 	public CreateActivationRequestResult createActivationRequest(CreateActivationRequest request, String trustedConsumerId) {
-		var existing = repository.findByExternalId(request.externalId());
+		var existing = repository.findByExternalIdAndConsumerId(request.externalId(), trustedConsumerId);
 		if (existing.isPresent()) {
 			return reuseExisting(existing.get(), request, trustedConsumerId);
 		}
@@ -67,9 +67,9 @@ public class ActivationRequestService {
 				throw exception;
 			}
 			// A transação de inserção já terminou com rollback; a consulta usa uma nova transação.
-			return repository.findByExternalId(request.externalId())
+			return repository.findByExternalIdAndConsumerId(request.externalId(), trustedConsumerId)
 					.map(entity -> reuseExisting(entity, request, trustedConsumerId))
-					.orElseThrow(() -> exception);
+					.orElseThrow(ActivationRequestConflictException::new);
 		}
 	}
 

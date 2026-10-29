@@ -275,7 +275,10 @@ class CreateActivationRequestEndpointTests {
 				Arguments.of(status, CONSUMER, "CUST-10001", "INTERNET-500 "),
 				Arguments.of(status, CONSUMER, "CUST-10001", "internet-500"),
 				Arguments.of(status, CONSUMER, "CUST-OTHER", "INTERNET-OTHER"),
-				Arguments.of(status, "other-consumer", "CUST-10001", "INTERNET-500")));
+				Arguments.of(status, "other-consumer", "CUST-10001", "INTERNET-500"),
+				Arguments.of(status, "other-consumer", "CUST-OTHER", "INTERNET-500"),
+				Arguments.of(status, "other-consumer", "CUST-10001", "INTERNET-OTHER"),
+				Arguments.of(status, "other-consumer", "CUST-OTHER", "INTERNET-OTHER")));
 	}
 
 	@Test
@@ -307,14 +310,18 @@ class CreateActivationRequestEndpointTests {
 	}
 
 	@ParameterizedTest
-	@ValueSource(strings = {"identical", "customerId", "productCode", "consumerId"})
+	@ValueSource(strings = {"identical", "customerId", "productCode", "consumerId", "consumerIdAndContent"})
 	void requestsLosingUniqueConstraintRaceApplyRepetitionRulesAfterRollback(String changedField) throws Exception {
 		UUID id = UUID.randomUUID();
 		var payload = (ObjectNode) objectMapper.readTree(PAYLOAD);
 		if (changedField.equals("customerId") || changedField.equals("productCode")) {
 			payload.put(changedField, "DIFFERENT");
 		}
-		String consumer = changedField.equals("consumerId") ? "other-consumer" : CONSUMER;
+		if (changedField.equals("consumerIdAndContent")) {
+			payload.put("customerId", "CUST-OTHER");
+			payload.put("productCode", "INTERNET-OTHER");
+		}
+		String consumer = changedField.startsWith("consumerId") ? "other-consumer" : CONSUMER;
 		String requestBody = objectMapper.writeValueAsString(payload);
 		try (var executor = Executors.newFixedThreadPool(3)) {
 			List<Future<MvcResult>> futures = new ArrayList<>();

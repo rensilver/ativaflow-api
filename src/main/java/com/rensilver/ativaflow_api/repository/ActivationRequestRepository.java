@@ -21,7 +21,7 @@ public interface ActivationRequestRepository extends JpaRepository<ActivationReq
 	Optional<ActivationRequest> findByIdAndConsumerId(UUID id, String consumerId);
 
 	@Transactional(readOnly = true)
-	Optional<ActivationRequest> findByExternalId(String externalId);
+	Optional<ActivationRequest> findByExternalIdAndConsumerId(String externalId, String consumerId);
 
 	/** Aplica o mesmo escopo de consumidor ao conteúdo e à contagem, apenas com os filtros presentes. */
 	default Page<ActivationRequest> findAllByFilters(String consumerId, @Nullable ActivationStatus status,
