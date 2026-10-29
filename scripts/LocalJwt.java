@@ -60,7 +60,7 @@ public class LocalJwt {
         long now = Instant.now().getEpochSecond();
         String header = "{\"alg\":\"RS256\",\"typ\":\"JWT\",\"kid\":\"" + kid(publicKey) + "\"}";
         String claims = """
-                {"iss":"https://ativaflow.local","sub":"%s","aud":"ativaflow-api","iat":%d,"nbf":%d,"exp":%d}
+                {"iss":"https://ativaflow.local","sub":"%s","aud":"ativaflow-api","token_use":"access","iat":%d,"nbf":%d,"exp":%d}
                 """.formatted(consumer, now, now - 5, now + 300).strip();
         String payload = encode(header.getBytes(StandardCharsets.UTF_8)) + "." + encode(claims.getBytes(StandardCharsets.UTF_8));
         var signer = Signature.getInstance("SHA256withRSA");

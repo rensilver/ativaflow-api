@@ -87,10 +87,10 @@ class LocalJwtDecoderUnitTests {
 	}
 
 	@Test
-	void audienceValidationIsOptionalWhenNotConfigured() throws Exception {
+	void refusesLocalDecoderWithoutExpectedAudience() {
 		properties.getJwt().setAudiences(List.of());
-		var decoder = new LocalJwtDecoderConfiguration().localJwtDecoder(properties);
-		assertThat(decoder.decode(token("missing-audience")).getSubject()).isEqualTo("client-one");
+		assertThatThrownBy(() -> new LocalJwtDecoderConfiguration().localJwtDecoder(properties))
+				.isInstanceOf(IllegalArgumentException.class).hasMessageContaining("audiences");
 	}
 
 	@Test
@@ -109,7 +109,7 @@ class LocalJwtDecoderUnitTests {
 
 	private static String token(String variant) throws Exception {
 		var now = Instant.now();
-		var claims = new JWTClaimsSet.Builder().subject("client-one")
+		var claims = new JWTClaimsSet.Builder().subject("client-one").claim("token_use", "access")
 				.issuer(variant.equals("wrong-issuer") ? "https://untrusted.example.test" : ISSUER)
 				.expirationTime(Date.from(now.plusSeconds(variant.equals("expired") ? -120 : 600)))
 				.notBeforeTime(Date.from(now.plusSeconds(variant.equals("future") ? 120 : -120)));

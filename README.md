@@ -1255,9 +1255,11 @@ a integração padrão do Spring; nenhuma origem adicional é liberada nesta tar
 
 As demais rotas exigem autenticação, incluindo Actuator sensível e Prometheus.
 Swagger/OpenAPI e health/probes preservam o acesso público existente.
-Esta etapa configura somente a base stateless; as regras `requests/read` e
-`requests/write` e validações específicas do emissor, como `token_use` do Cognito,
-dependem das próximas etapas e do contrato adotado.
+No perfil `local`, o contrato de demonstração exige assinatura RS256, `iss`,
+`exp`, audience da API e `token_use=access`; valida `nbf` quando presente,
+tanto com PEM quanto com JWKS. A identidade do consumidor continua em `sub`.
+As regras `requests/read` e `requests/write` e os contratos de emissores externos
+dependem das próximas etapas.
 
 Veja [Configuração JWT e demonstração local](docs/resource-server.md) para variáveis
 de ambiente, JWKS, audience e geração de chave/token efêmeros fora do repositório.
@@ -1270,6 +1272,13 @@ com tokens realmente assinados, sem Spring Boot, banco, Docker ou rede:
 
 ```bash
 bash ./mvnw -Dtest=ResourceServerSecurityConfigurationUnitTests,LocalJwtDecoderUnitTests test
+```
+
+Para executar somente os testes unitários criados para validar o contrato do
+Access Token local e sua geração/renovação:
+
+```bash
+bash ./mvnw -Dtest=LocalAccessTokenValidationUnitTests,LocalAccessTokenMaterialUnitTests test
 ```
 
 ## Testes e integração contínua

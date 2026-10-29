@@ -33,7 +33,8 @@ Não copie os arquivos gerados para o repositório, nem para fixtures de testes.
 
 Diretórios são criados com permissão `700`; arquivos, com `600`. Nenhum token ou
 chave é escrito no console. O token tem `iss=https://ativaflow.local`,
-`aud=ativaflow-api`, `sub=demo-consumer`, `iat`, `nbf`, `exp` e header `kid`.
+`aud=ativaflow-api`, `sub=demo-consumer`, `token_use=access`, `iat`, `nbf`, `exp`
+e header `kid`.
 Esses valores são exclusivos da demonstração local.
 
 ## Modo 1: PEM sem servidor de chaves
@@ -46,8 +47,9 @@ Inicie a API no mesmo terminal:
 bash ./mvnw spring-boot:run
 ```
 
-`LocalJwtDecoderConfiguration` valida assinatura RS256, issuer, timestamps e a
-audience configurada. A API lê somente a chave pública. O issuer local serve
+`LocalJwtDecoderConfiguration` valida assinatura RS256, issuer, `exp`
+obrigatório, `nbf` quando presente, audience obrigatória e `token_use=access`.
+A API lê somente a chave pública. O issuer local serve
 como identificador e não precisa resolver na rede.
 
 ## Modo 2: JWKS em loopback
@@ -64,15 +66,17 @@ curl --fail http://127.0.0.1:8082/jwks.json
 bash ./mvnw spring-boot:run
 ```
 
-Mantenha issuer e audience definidos por `env.sh`. O Boot usa a URL explícita
-do JWKS sem discovery do issuer e valida `iss` e `aud`. A chave pública é buscada
+Mantenha issuer e audience definidos por `env.sh`. A configuração local usa a URL
+explícita do JWKS sem discovery do issuer e aplica as mesmas regras do modo PEM,
+incluindo `exp` obrigatório e `token_use=access`. A chave pública é buscada
 ao validar tokens e fica em cache; mantenha o servidor disponível. A porta 8082
 deve estar livre. O servidor HTTP expõe somente `jwks/`; a chave privada e o
 header Bearer ficam no diretório pai. HTTP é usado apenas neste loopback local;
 para um emissor externo, use o endpoint HTTPS do seu contrato.
 
 Não configure `PUBLICKEYLOCATION` e `JWKSETURI` simultaneamente: o perfil local
-rejeita essa combinação na inicialização. Reinicie a API ao trocar de modo ou
+rejeita essa combinação na inicialização. Issuer, audience e uma fonte de chave
+são obrigatórios no perfil `local`. Reinicie a API ao trocar de modo ou
 gerar um novo par de chaves.
 
 ## Verificar a API e renovar o token
@@ -109,6 +113,9 @@ Para renovar por mais cinco minutos, preservando as chaves e o consumidor:
 java scripts/LocalJwt.java token "$JWT_DEMO_DIR"
 ```
 
+Tokens emitidos antes da exigência de `token_use=access` também devem ser
+renovados com esse comando, usando o utilitário atualizado.
+
 Para emitir para outro consumidor, informe o terceiro argumento, por exemplo
 `another-consumer`. São aceitos de 1 a 100 caracteres alfanuméricos, `.`, `_`,
 `@` e `-`, começando por um alfanumérico. O comando substitui o header anterior;
@@ -142,6 +149,14 @@ O material não é apagado automaticamente ao parar a API. Expiração do token 
 remoção dos arquivos têm finalidades diferentes; sempre faça a limpeza.
 
 ## Testes unitários desta tarefa
+
+Contrato do Access Token, geração e renovação:
+
+```bash
+bash ./mvnw -Dtest=LocalAccessTokenValidationUnitTests,LocalAccessTokenMaterialUnitTests test
+```
+
+Testes anteriores dos artefatos e das fontes de chave:
 
 ```bash
 bash ./mvnw -Dtest=LocalJwtMaterialUnitTests,LocalJwtKeySourceUnitTests test
