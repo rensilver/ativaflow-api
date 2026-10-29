@@ -792,6 +792,21 @@ conclusão da ativação pertence ao worker.
 Dados inválidos, propriedades desconhecidas ou campos controlados pelo servidor
 no JSON resultam em `400 Bad Request`, sem inserção.
 
+Falhas do provedor não alteram o HTTP da criação: rejeições, indisponibilidade,
+timeout e falhas de comunicação são classificadas pelo cliente e tratadas pelo
+worker. Status, corpo e cabeçalhos do provedor, incluindo `Retry-After`, não
+compõem a resposta do POST. Repetir uma solicitação que terminou em `FAILED`
+retorna `200 OK` com seu estado atual. Falhas locais ao persistir a criação
+continuam retornando erro HTTP; `201` confirma somente a persistência local.
+
+`AsyncProviderFailureIsolationUnitTests` protege esse contrato em memória e
+impede dependências diretas da criação e do tratamento HTTP de erros em relação
+ao cliente do provedor ou ao worker. Para executar somente esses testes:
+
+```bash
+bash ./mvnw -Dtest=AsyncProviderFailureIsolationUnitTests test
+```
+
 A segurança atual exige autenticação e CSRF. Exemplo com credenciais válidas,
 cookie de sessão e token CSRF obtidos na mesma sessão (por exemplo, no formulário
 `/login`):
