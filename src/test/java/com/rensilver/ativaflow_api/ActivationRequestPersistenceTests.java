@@ -189,6 +189,55 @@ class ActivationRequestPersistenceTests {
 		}
 	}
 
+	@ParameterizedTest
+	@EnumSource(value = ActivationStatus.class, names = {"COMPLETED", "FAILED"})
+	@Transactional(propagation = Propagation.NOT_SUPPORTED)
+	void preservesTerminalResultWhenConcurrentWriterHasStaleProcessingState(ActivationStatus winningStatus) {
+		ActivationRequest request = newRequest();
+		request.startProcessing();
+		try (EntityManager winner = entityManagerFactory.createEntityManager();
+			 EntityManager loser = entityManagerFactory.createEntityManager()) {
+			try {
+				winner.getTransaction().begin();
+				winner.persist(request);
+				winner.getTransaction().commit();
+				winner.clear();
+
+				winner.getTransaction().begin();
+				loser.getTransaction().begin();
+				var current = winner.find(ActivationRequest.class, request.getId());
+				var stale = loser.find(ActivationRequest.class, request.getId());
+				if (winningStatus == ActivationStatus.COMPLETED) {
+					current.complete();
+					stale.fail("PROVIDER_REJECTED");
+				} else {
+					current.fail("PROVIDER_REJECTED");
+					stale.complete();
+				}
+				winner.getTransaction().commit();
+				var terminalRow = jdbcTemplate.queryForMap("SELECT * FROM activation_requests WHERE id = ?", request.getId());
+				assertThat(terminalRow.get("status")).isEqualTo(winningStatus.name());
+				assertThat(terminalRow.get("version")).isEqualTo(1L);
+				assertThat(terminalRow.get("last_error_code"))
+						.isEqualTo(winningStatus == ActivationStatus.FAILED ? "PROVIDER_REJECTED" : null);
+
+				assertThatThrownBy(loser::flush).isInstanceOf(OptimisticLockException.class);
+				loser.getTransaction().rollback();
+				assertThat(jdbcTemplate.queryForMap("SELECT * FROM activation_requests WHERE id = ?", request.getId()))
+						.isEqualTo(terminalRow);
+			} finally {
+				if (winner.getTransaction().isActive()) {
+					winner.getTransaction().rollback();
+				}
+				if (loser.getTransaction().isActive()) {
+					loser.getTransaction().rollback();
+				}
+			}
+		} finally {
+			jdbcTemplate.update("DELETE FROM activation_requests WHERE id = ?", request.getId());
+		}
+	}
+
 	private ActivationRequest newRequest() {
 		return ActivationRequest.create("EXT-" + UUID.randomUUID(), "CUSTOMER-1", "PRODUCT-1", "consumer-a");
 	}

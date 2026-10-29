@@ -6,17 +6,22 @@ import com.rensilver.ativaflow_api.domain.ActivationStatus;
 import com.rensilver.ativaflow_api.dto.request.CreateActivationRequest;
 import com.rensilver.ativaflow_api.dto.response.ActivationRequestPageResponse;
 import com.rensilver.ativaflow_api.dto.response.ActivationRequestResponse;
+import com.rensilver.ativaflow_api.exception.ActivationRequestConflictException;
 import com.rensilver.ativaflow_api.exception.ActivationRequestNotFoundException;
 import com.rensilver.ativaflow_api.exception.InvalidPaginationException;
 import com.rensilver.ativaflow_api.mapper.ActivationRequestMapper;
 import com.rensilver.ativaflow_api.model.ActivationRequest;
 import com.rensilver.ativaflow_api.repository.ActivationRequestRepository;
+import com.rensilver.ativaflow_api.service.model.CreateActivationRequestResult;
 import lombok.RequiredArgsConstructor;
+import org.hibernate.exception.ConstraintViolationException;
+import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.data.domain.Page;
 import org.springframework.data.domain.PageRequest;
 import org.springframework.data.domain.Sort;
 import org.springframework.lang.Nullable;
 import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Propagation;
 import org.springframework.transaction.annotation.Transactional;
 
 @Service
@@ -27,6 +32,7 @@ public class ActivationRequestService {
 
 	private final ActivationRequestRepository repository;
 	private final ActivationRequestMapper mapper;
+	private final ActivationRequestCreationTransaction creationTransaction;
 
 	@Transactional(readOnly = true)
 	public ActivationRequestPageResponse listActivationRequests(@Nullable ActivationStatus status, @Nullable String customerId,
@@ -48,11 +54,43 @@ public class ActivationRequestService {
 		return mapper.toResponse(entity);
 	}
 
-	@Transactional
-	public ActivationRequestResponse createActivationRequest(CreateActivationRequest request, String trustedConsumerId) {
-		ActivationRequest entity = ActivationRequest.create(
-				request.externalId(), request.customerId(), request.productCode(), trustedConsumerId);
-		ActivationRequest saved = repository.save(entity);
-		return mapper.toResponse(saved);
+	@Transactional(propagation = Propagation.NOT_SUPPORTED)
+	public CreateActivationRequestResult createActivationRequest(CreateActivationRequest request, String trustedConsumerId) {
+		var existing = repository.findByExternalIdAndConsumerId(request.externalId(), trustedConsumerId);
+		if (existing.isPresent()) {
+			return reuseExisting(existing.get(), request, trustedConsumerId);
+		}
+		try {
+			return new CreateActivationRequestResult(creationTransaction.insert(request, trustedConsumerId), true);
+		}
+		catch (DataIntegrityViolationException exception) {
+			if (!isExternalIdConflict(exception)) {
+				throw exception;
+			}
+			// A transação de inserção já terminou com rollback; a consulta usa uma nova transação.
+			return repository.findWinnerByExternalIdAndConsumerId(request.externalId(), trustedConsumerId)
+					.map(entity -> reuseExisting(entity, request, trustedConsumerId))
+					.orElseThrow(ActivationRequestConflictException::new);
+		}
+	}
+
+	private CreateActivationRequestResult reuseExisting(ActivationRequest existing, CreateActivationRequest request,
+			String trustedConsumerId) {
+		if (!existing.getConsumerId().equals(trustedConsumerId)
+				|| !existing.getCustomerId().equals(request.customerId())
+				|| !existing.getProductCode().equals(request.productCode())) {
+			throw new ActivationRequestConflictException();
+		}
+		return new CreateActivationRequestResult(mapper.toResponse(existing), false);
+	}
+
+	private boolean isExternalIdConflict(DataIntegrityViolationException exception) {
+		for (Throwable cause = exception; cause != null; cause = cause.getCause()) {
+			if (cause instanceof ConstraintViolationException violation
+					&& "uk_activation_requests_external_id".equals(violation.getConstraintName())) {
+				return true;
+			}
+		}
+		return false;
 	}
 }

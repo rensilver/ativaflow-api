@@ -4,19 +4,29 @@ import java.time.Clock;
 import java.time.Instant;
 import java.time.OffsetDateTime;
 import java.time.ZoneOffset;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.Map;
 import java.util.UUID;
+import java.util.concurrent.CyclicBarrier;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import java.util.concurrent.TimeUnit;
 import java.util.stream.Stream;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import com.github.tomakehurst.wiremock.junit5.WireMockExtension;
 import com.rensilver.ativaflow_api.controller.ActivationRequestController;
+import com.rensilver.ativaflow_api.domain.ActivationStatus;
 import com.rensilver.ativaflow_api.dto.response.ActivationRequestResponse;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.RegisterExtension;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.Arguments;
+import org.junit.jupiter.params.provider.CsvSource;
+import org.junit.jupiter.params.provider.EnumSource;
 import org.junit.jupiter.params.provider.MethodSource;
 import org.junit.jupiter.params.provider.ValueSource;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -37,7 +47,12 @@ import org.springframework.lang.Nullable;
 import org.springframework.test.context.ActiveProfiles;
 import org.springframework.test.context.DynamicPropertyRegistry;
 import org.springframework.test.context.DynamicPropertySource;
+import org.springframework.test.json.JsonCompareMode;
 import org.springframework.test.web.servlet.MockMvc;
+import org.springframework.test.web.servlet.MvcResult;
+import org.springframework.transaction.PlatformTransactionManager;
+import org.springframework.transaction.TransactionDefinition;
+import org.springframework.transaction.support.TransactionTemplate;
 import org.springframework.transaction.support.TransactionSynchronizationManager;
 import org.springframework.web.bind.annotation.ControllerAdvice;
 import org.springframework.web.bind.annotation.PostMapping;
@@ -50,11 +65,13 @@ import static com.github.tomakehurst.wiremock.client.WireMock.request;
 import static com.github.tomakehurst.wiremock.client.WireMock.urlEqualTo;
 import static com.github.tomakehurst.wiremock.core.WireMockConfiguration.wireMockConfig;
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.awaitility.Awaitility.await;
 import static org.springframework.security.test.web.servlet.request.SecurityMockMvcRequestPostProcessors.csrf;
 import static org.springframework.security.test.web.servlet.request.SecurityMockMvcRequestPostProcessors.user;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.content;
+import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.header;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
@@ -66,6 +83,7 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
 class CreateActivationRequestEndpointTests {
 
 	private static final String CONSUMER = "consumer-post-tests";
+	private static final String OTHER_CONSUMER = "consumer-post-tests-other";
 	private static final String PATH = "/api/v1/requests";
 	private static final Instant CREATED_AT = Instant.parse("2026-10-28T15:00:00.123456Z");
 	private static final Instant PROCESSED_AT = Instant.parse("2026-10-28T15:01:00.123456Z");
@@ -92,9 +110,12 @@ class CreateActivationRequestEndpointTests {
 	@Autowired
 	private JdbcTemplate jdbcTemplate;
 
+	@Autowired
+	private PlatformTransactionManager transactionManager;
+
 	@AfterEach
 	void removeCreatedRequests() {
-		jdbcTemplate.update("DELETE FROM activation_requests WHERE consumer_id = ?", CONSUMER);
+		jdbcTemplate.update("DELETE FROM activation_requests WHERE consumer_id IN (?, ?)", CONSUMER, OTHER_CONSUMER);
 	}
 
 	@Test
@@ -159,6 +180,76 @@ class CreateActivationRequestEndpointTests {
 	}
 
 	@Test
+	void sequentialIdenticalRequestsReuseOriginalResponseAndKeepOneRecordForExternalId() throws Exception {
+		String externalId = objectMapper.readTree(PAYLOAD).get("externalId").asText();
+		assertThat(jdbcTemplate.queryForObject(
+				"SELECT COUNT(*) FROM activation_requests WHERE external_id = ?", Long.class, externalId)).isZero();
+
+		var created = mockMvc.perform(post(PATH).with(user(CONSUMER)).with(csrf())
+				.contentType(MediaType.APPLICATION_JSON).content(PAYLOAD))
+				.andExpect(status().isCreated())
+				.andExpect(jsonPath("$.status").value("PENDING"))
+				.andReturn().getResponse();
+		String originalResponse = created.getContentAsString();
+		String id = objectMapper.readTree(originalResponse).get("id").asText();
+		assertThat(created.getHeader("Location")).isEqualTo(PATH + "/" + id);
+		assertThat(jdbcTemplate.queryForObject(
+				"SELECT COUNT(*) FROM activation_requests WHERE external_id = ?", Long.class, externalId)).isEqualTo(1);
+		var storedBefore = jdbcTemplate.queryForMap(
+				"SELECT * FROM activation_requests WHERE external_id = ?", externalId);
+
+		for (int repetition = 0; repetition < 2; repetition++) {
+			mockMvc.perform(post(PATH).with(user(CONSUMER)).with(csrf())
+					.contentType(MediaType.APPLICATION_JSON).content(PAYLOAD))
+					.andExpect(status().isOk())
+					.andExpect(header().doesNotExist("Location"))
+					.andExpect(content().contentTypeCompatibleWith(MediaType.APPLICATION_JSON))
+					.andExpect(content().json(originalResponse, JsonCompareMode.STRICT));
+
+			assertThat(jdbcTemplate.queryForObject(
+					"SELECT COUNT(*) FROM activation_requests WHERE external_id = ?", Long.class, externalId))
+					.isEqualTo(1);
+			assertThat(jdbcTemplate.queryForMap(
+					"SELECT * FROM activation_requests WHERE external_id = ?", externalId)).isEqualTo(storedBefore);
+		}
+		provider.verify(0, anyRequestedFor(anyUrl()));
+	}
+
+	@ParameterizedTest
+	@EnumSource(ActivationStatus.class)
+	void identicalRepetitionReturnsCurrentRecordWithoutChangingOrReactivatingIt(ActivationStatus activationStatus)
+			throws Exception {
+		var created = mockMvc.perform(post(PATH).with(user(CONSUMER)).with(csrf())
+				.contentType(MediaType.APPLICATION_JSON).content(PAYLOAD))
+				.andExpect(status().isCreated()).andReturn().getResponse().getContentAsString();
+		UUID id = UUID.fromString(objectMapper.readTree(created).get("id").asText());
+		jdbcTemplate.update("""
+				UPDATE activation_requests SET status = ?, updated_at = ?, version = 4,
+				attempt_count = 2, next_attempt_at = ?, lease_until = ?, claimed_by = 'worker-1',
+				last_error_code = 'PROVIDER_TIMEOUT', reconciliation_required = true WHERE id = ?
+				""", activationStatus.name(), OffsetDateTime.ofInstant(PROCESSED_AT, ZoneOffset.UTC),
+				OffsetDateTime.ofInstant(PROCESSED_AT, ZoneOffset.UTC),
+				OffsetDateTime.ofInstant(PROCESSED_AT, ZoneOffset.UTC), id);
+		var storedBefore = jdbcTemplate.queryForMap("SELECT * FROM activation_requests WHERE id = ?", id);
+		var expected = (ObjectNode) objectMapper.readTree(created);
+		expected.put("status", activationStatus.name());
+		expected.put("updatedAt", PROCESSED_AT.toString());
+
+		for (int repetition = 0; repetition < 2; repetition++) {
+			mockMvc.perform(post(PATH).with(user(CONSUMER)).with(csrf())
+					.contentType(MediaType.APPLICATION_JSON).content(PAYLOAD))
+					.andExpect(status().isOk())
+					.andExpect(content().contentTypeCompatibleWith(MediaType.APPLICATION_JSON))
+					.andExpect(content().json(objectMapper.writeValueAsString(expected), JsonCompareMode.STRICT));
+		}
+
+		assertThat(storedRequestCount()).isEqualTo(1);
+		assertThat(jdbcTemplate.queryForMap("SELECT * FROM activation_requests WHERE id = ?", id))
+				.isEqualTo(storedBefore);
+		provider.verify(0, anyRequestedFor(anyUrl()));
+	}
+
+	@Test
 	void returnsCreationSnapshotWhenProcessingFinishesBeforeSerialization() throws Exception {
 		var payload = (ObjectNode) objectMapper.readTree(PAYLOAD);
 		payload.put("externalId", SNAPSHOT_EXTERNAL_ID);
@@ -184,6 +275,245 @@ class CreateActivationRequestEndpointTests {
 					return id;
 				}, id);
 		provider.verify(0, anyRequestedFor(anyUrl()));
+	}
+
+	@ParameterizedTest
+	@MethodSource("conflictingRequests")
+	void rejectsRepetitionWithDifferentContentOrConsumerWithoutExposingOrChangingRecord(
+			ActivationStatus activationStatus, String consumer, String customerId, String productCode)
+			throws Exception {
+		mockMvc.perform(post(PATH).with(user(CONSUMER)).with(csrf())
+				.contentType(MediaType.APPLICATION_JSON).content(PAYLOAD))
+				.andExpect(status().isCreated());
+		jdbcTemplate.update("""
+				UPDATE activation_requests SET status = ?, updated_at = ?, version = 4,
+				attempt_count = 2, next_attempt_at = ?, lease_until = ?, claimed_by = 'worker-private',
+				last_error_code = 'PROVIDER_TIMEOUT', reconciliation_required = true WHERE consumer_id = ?
+				""", activationStatus.name(), OffsetDateTime.ofInstant(PROCESSED_AT, ZoneOffset.UTC),
+				OffsetDateTime.ofInstant(PROCESSED_AT.plusSeconds(30), ZoneOffset.UTC),
+				OffsetDateTime.ofInstant(PROCESSED_AT.plusSeconds(60), ZoneOffset.UTC), CONSUMER);
+		var storedBefore = jdbcTemplate.queryForMap(
+				"SELECT * FROM activation_requests WHERE consumer_id = ?", CONSUMER);
+		var payload = (ObjectNode) objectMapper.readTree(PAYLOAD);
+		payload.put("customerId", customerId);
+		payload.put("productCode", productCode);
+
+		var result = mockMvc.perform(post(PATH).with(user(consumer)).with(csrf())
+				.contentType(MediaType.APPLICATION_JSON).content(objectMapper.writeValueAsString(payload)))
+				.andReturn();
+		assertConflictProblem(result);
+
+		assertThat(jdbcTemplate.queryForMap(
+				"SELECT * FROM activation_requests WHERE consumer_id = ?", CONSUMER)).isEqualTo(storedBefore);
+		assertThat(jdbcTemplate.queryForObject(
+				"SELECT COUNT(*) FROM activation_requests WHERE external_id = ?", Long.class, " EXT-12345 "))
+				.isEqualTo(1);
+		provider.verify(0, anyRequestedFor(anyUrl()));
+	}
+
+	static Stream<Arguments> conflictingRequests() {
+		return Stream.of(ActivationStatus.values()).flatMap(status -> Stream.of(
+				Arguments.of(status, CONSUMER, "CUST-OTHER", "INTERNET-500"),
+				Arguments.of(status, CONSUMER, "CUST-10001 ", "INTERNET-500"),
+				Arguments.of(status, CONSUMER, "cust-10001", "INTERNET-500"),
+				Arguments.of(status, CONSUMER, "CUST-10001", "INTERNET-OTHER"),
+				Arguments.of(status, CONSUMER, "CUST-10001", "INTERNET-500 "),
+				Arguments.of(status, CONSUMER, "CUST-10001", "internet-500"),
+				Arguments.of(status, CONSUMER, "CUST-OTHER", "INTERNET-OTHER"),
+				Arguments.of(status, OTHER_CONSUMER, "CUST-10001", "INTERNET-500"),
+				Arguments.of(status, OTHER_CONSUMER, "CUST-OTHER", "INTERNET-500"),
+				Arguments.of(status, OTHER_CONSUMER, "CUST-10001", "INTERNET-OTHER"),
+				Arguments.of(status, OTHER_CONSUMER, "CUST-OTHER", "INTERNET-OTHER")));
+	}
+
+	@ParameterizedTest
+	@CsvSource({"CUST-10001, INTERNET-500", "CUST-OTHER, INTERNET-500",
+			"CUST-10001, INTERNET-OTHER", "CUST-OTHER, INTERNET-OTHER"})
+	void consumerCollisionPreservesOwnershipAndDoesNotExposeRecordThroughLookupOrListing(
+			String customerId, String productCode) throws Exception {
+		var created = mockMvc.perform(post(PATH).with(user(CONSUMER)).with(csrf())
+				.contentType(MediaType.APPLICATION_JSON).content(PAYLOAD))
+				.andExpect(status().isCreated()).andReturn().getResponse();
+		String originalResponse = created.getContentAsString();
+		String location = created.getHeader("Location");
+		var storedBefore = jdbcTemplate.queryForMap(
+				"SELECT * FROM activation_requests WHERE consumer_id = ?", CONSUMER);
+		var payload = (ObjectNode) objectMapper.readTree(PAYLOAD);
+		payload.put("customerId", customerId);
+		payload.put("productCode", productCode);
+
+		var collision = mockMvc.perform(post(PATH).with(user(OTHER_CONSUMER)).with(csrf())
+				.contentType(MediaType.APPLICATION_JSON).content(objectMapper.writeValueAsString(payload)))
+				.andReturn();
+		assertConflictProblem(collision);
+		mockMvc.perform(get(location).with(user(OTHER_CONSUMER)))
+				.andExpect(status().isNotFound())
+				.andExpect(content().contentTypeCompatibleWith(MediaType.APPLICATION_PROBLEM_JSON))
+				.andExpect(content().json("""
+						{"type":"about:blank","title":"Not Found","status":404,
+						 "detail":"Activation request not found","instance":"%s"}
+						""".formatted(location), JsonCompareMode.STRICT));
+		mockMvc.perform(get(PATH).with(user(OTHER_CONSUMER)))
+				.andExpect(status().isOk())
+				.andExpect(content().json("""
+						{"content":[],"page":0,"size":20,"totalElements":0,"totalPages":0}
+						""", JsonCompareMode.STRICT));
+
+		// O rollback da colisão não deve impedir uma criação legítima do outro consumidor.
+		payload.put("externalId", "EXT-OTHER-CONSUMER");
+		var otherCreated = mockMvc.perform(post(PATH).with(user(OTHER_CONSUMER)).with(csrf())
+				.contentType(MediaType.APPLICATION_JSON).content(objectMapper.writeValueAsString(payload)))
+				.andExpect(status().isCreated()).andReturn().getResponse().getContentAsString();
+		mockMvc.perform(get(PATH).with(user(OTHER_CONSUMER)))
+				.andExpect(status().isOk())
+				.andExpect(content().json("""
+						{"content":[%s],"page":0,"size":20,"totalElements":1,"totalPages":1}
+						""".formatted(otherCreated), JsonCompareMode.STRICT));
+		mockMvc.perform(post(PATH).with(user(CONSUMER)).with(csrf())
+				.contentType(MediaType.APPLICATION_JSON).content(PAYLOAD))
+				.andExpect(status().isOk())
+				.andExpect(header().doesNotExist("Location"))
+				.andExpect(content().json(originalResponse, JsonCompareMode.STRICT));
+		assertThat(jdbcTemplate.queryForMap(
+				"SELECT * FROM activation_requests WHERE consumer_id = ?", CONSUMER)).isEqualTo(storedBefore);
+		assertThat(jdbcTemplate.queryForObject(
+				"SELECT COUNT(*) FROM activation_requests WHERE external_id = ?", Long.class, " EXT-12345 "))
+				.isEqualTo(1);
+		provider.verify(0, anyRequestedFor(anyUrl()));
+	}
+
+	@Test
+	void concurrentIdenticalRequestsCreateOneRecordAndReturnItToEveryCaller() throws Exception {
+		int callers = 4;
+		var start = new CyclicBarrier(callers);
+		try (var executor = Executors.newFixedThreadPool(callers)) {
+			List<Future<MvcResult>> futures = new ArrayList<>();
+			for (int caller = 0; caller < callers; caller++) {
+				futures.add(executor.submit(() -> {
+					start.await(10, TimeUnit.SECONDS);
+					return mockMvc.perform(post(PATH).with(user(CONSUMER)).with(csrf())
+							.contentType(MediaType.APPLICATION_JSON).content(PAYLOAD)).andReturn();
+				}));
+			}
+			List<MvcResult> results = new ArrayList<>();
+			for (var future : futures) {
+				results.add(future.get(20, TimeUnit.SECONDS));
+			}
+			assertThat(results).extracting(result -> result.getResponse().getStatus())
+					.containsExactlyInAnyOrder(201, 200, 200, 200);
+			var expected = objectMapper.readTree(results.getFirst().getResponse().getContentAsString());
+			UUID id = UUID.fromString(expected.get("id").asText());
+			for (var result : results) {
+				assertThat(objectMapper.readTree(result.getResponse().getContentAsString())).isEqualTo(expected);
+				if (result.getResponse().getStatus() == 201) {
+					header().string("Location", PATH + "/" + id).match(result);
+				}
+				else {
+					header().doesNotExist("Location").match(result);
+				}
+			}
+			// Releitura fora das threads: somente dados confirmados em suas transações são visíveis.
+			assertThat(jdbcTemplate.queryForObject(
+					"SELECT COUNT(*) FROM activation_requests WHERE external_id = ?", Long.class, " EXT-12345 "))
+					.isEqualTo(1);
+			mockMvc.perform(get(PATH + "/" + id).with(user(CONSUMER)))
+					.andExpect(status().isOk())
+					.andExpect(content().json(expected.toString(), JsonCompareMode.STRICT));
+		}
+		assertThat(storedRequestCount()).isEqualTo(1);
+		provider.verify(0, anyRequestedFor(anyUrl()));
+	}
+
+	@ParameterizedTest
+	@ValueSource(strings = {"identical", "customerId", "productCode", "content", "consumerId", "consumerIdAndContent"})
+	void requestsLosingUniqueConstraintRaceApplyRepetitionRulesAfterRollback(String changedField) throws Exception {
+		UUID id = UUID.randomUUID();
+		var payload = (ObjectNode) objectMapper.readTree(PAYLOAD);
+		if (changedField.equals("customerId") || changedField.equals("productCode")) {
+			payload.put(changedField, "DIFFERENT");
+		}
+		if (changedField.equals("content") || changedField.equals("consumerIdAndContent")) {
+			payload.put("customerId", "CUST-OTHER");
+			payload.put("productCode", "INTERNET-OTHER");
+		}
+		String consumer = changedField.startsWith("consumerId") ? OTHER_CONSUMER : CONSUMER;
+		String requestBody = objectMapper.writeValueAsString(payload);
+		int callers = 3;
+		var start = new CyclicBarrier(callers);
+		var winnerTransaction = new TransactionTemplate(transactionManager);
+		winnerTransaction.setPropagationBehavior(TransactionDefinition.PROPAGATION_REQUIRES_NEW);
+		try (var executor = Executors.newFixedThreadPool(callers)) {
+			List<Future<MvcResult>> futures = new ArrayList<>();
+			var storedBefore = winnerTransaction.execute(transaction -> {
+				jdbcTemplate.update("""
+						INSERT INTO activation_requests
+						(id, external_id, customer_id, product_code, consumer_id, created_at, updated_at)
+						VALUES (?, ?, ?, ?, ?, ?, ?)
+						""", id, " EXT-12345 ", "CUST-10001", "INTERNET-500", CONSUMER,
+						OffsetDateTime.ofInstant(CREATED_AT, ZoneOffset.UTC),
+						OffsetDateTime.ofInstant(CREATED_AT, ZoneOffset.UTC));
+				var winnerBackendPid = jdbcTemplate.queryForObject("SELECT pg_backend_pid()", Integer.class);
+				for (int caller = 0; caller < callers; caller++) {
+					futures.add(executor.submit(() -> {
+						// A transação vencedora pertence à thread principal e não é compartilhada.
+						assertThat(TransactionSynchronizationManager.isActualTransactionActive()).isFalse();
+						start.await(10, TimeUnit.SECONDS);
+						return mockMvc.perform(post(PATH).with(user(consumer)).with(csrf())
+								.contentType(MediaType.APPLICATION_JSON).content(requestBody)).andReturn();
+					}));
+				}
+				// Só confirma a vencedora quando três conexões/transações distintas disputam seu lock.
+				await().atMost(10, TimeUnit.SECONDS).untilAsserted(() -> assertThat(jdbcTemplate.queryForMap("""
+						SELECT count(*) AS waiting_inserts, count(DISTINCT pid) AS connections,
+						       count(DISTINCT backend_xid::text) AS transactions
+						FROM pg_stat_activity
+						WHERE datname = current_database()
+						AND state = 'active' AND wait_event_type = 'Lock' AND wait_event = 'transactionid'
+						AND query LIKE 'insert into activation_requests%'
+						AND pid <> ?
+						AND ? = ANY(pg_blocking_pids(pid))
+						""", winnerBackendPid, winnerBackendPid)).isEqualTo(Map.of("waiting_inserts", (long) callers,
+							"connections", (long) callers, "transactions", (long) callers)));
+				return jdbcTemplate.queryForMap("SELECT * FROM activation_requests WHERE id = ?", id);
+			});
+			for (var future : futures) {
+				var result = future.get(20, TimeUnit.SECONDS);
+				if (!changedField.equals("identical")) {
+					assertConflictProblem(result);
+					continue;
+				}
+				var response = result.getResponse();
+				assertThat(response.getStatus()).isEqualTo(200);
+				header().doesNotExist("Location").match(result);
+				var body = objectMapper.readTree(response.getContentAsString());
+				assertThat(body.get("id").asText()).isEqualTo(id.toString());
+				assertThat(body.get("status").asText()).isEqualTo("PENDING");
+				assertThat(body.get("createdAt").asText()).isEqualTo(CREATED_AT.toString());
+				assertThat(body.size()).isEqualTo(7);
+			}
+			assertThat(jdbcTemplate.queryForMap("SELECT * FROM activation_requests WHERE id = ?", id))
+					.isEqualTo(storedBefore);
+		}
+		assertThat(jdbcTemplate.queryForObject(
+				"SELECT COUNT(*) FROM activation_requests WHERE external_id = ?", Long.class, " EXT-12345 "))
+				.isEqualTo(1);
+		assertThat(storedRequestCount()).isEqualTo(1);
+		provider.verify(0, anyRequestedFor(anyUrl()));
+	}
+
+	private void assertConflictProblem(MvcResult result) throws Exception {
+		status().isConflict().match(result);
+		content().contentTypeCompatibleWith(MediaType.APPLICATION_PROBLEM_JSON).match(result);
+		header().doesNotExist("Location").match(result);
+		content().json("""
+				{
+				  "type": "about:blank",
+				  "title": "Conflict",
+				  "status": 409,
+				  "detail": "Activation request conflict",
+				  "instance": "/api/v1/requests"
+				}
+				""", JsonCompareMode.STRICT).match(result);
 	}
 
 	@ParameterizedTest

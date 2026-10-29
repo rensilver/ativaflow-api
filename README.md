@@ -35,6 +35,8 @@ Pacote base: `com.rensilver.ativaflow_api`.
 | `config` | Configurações Spring e propriedades da aplicação. |
 | `controller` | Endpoints REST, validação de entrada e respostas HTTP. |
 | `service` | Orquestração dos casos de uso e delimitação de transações. |
+| `service.model` | Resultados e fotografias imutáveis do processamento dos serviços. |
+| `service.policy` | Políticas de execução, como cálculo de backoff e jitter. |
 | `repository` | Acesso a dados com Spring Data JPA e operações de persistência. |
 | `domain` | Regras, estados e resultados de negócio. |
 | `domain.exception` | Exceções de regras e transições de domínio. |
@@ -50,6 +52,9 @@ Pacote base: `com.rensilver.ativaflow_api`.
 | `observability` | Correlação, métricas e suporte a tracing. |
 
 `AtivaflowApiApplication.java` contém o ponto de entrada da aplicação.
+
+A análise de responsabilidades, dependências e fronteiras transacionais da camada
+de serviços está em [Responsabilidades dos serviços](docs/service-responsibilities.md).
 
 ## Arquivos de configuração
 
@@ -93,6 +98,11 @@ A migração `V1__create_activation_requests.sql` cria a tabela `activation_requ
 | `created_at` | `TIMESTAMP WITH TIME ZONE`, obrigatório; padrão `CURRENT_TIMESTAMP`. |
 | `updated_at` | `TIMESTAMP WITH TIME ZONE`, obrigatório; padrão `CURRENT_TIMESTAMP`. |
 
+A V1 cria a constraint `uk_activation_requests_external_id UNIQUE (external_id)`.
+A chave contém apenas `external_id`: o mesmo valor colide mesmo quando consumidor,
+cliente, produto ou status diferem. Essa regra é aplicada pelo PostgreSQL a todas
+as escritas na tabela.
+
 Os nomes em `snake_case` correspondem aos campos `externalId`, `customerId`,
 `productCode`, `createdAt` e `updatedAt` do contrato da API. O limite adotado para
 os três identificadores textuais é de 100 caracteres. As datas representam
@@ -114,6 +124,17 @@ adiciona os campos internos abaixo, preservando a V1 e o contrato público:
 | `last_error_code` | `VARCHAR(100)`, opcional; código categorizado da última falha, sem payload, credenciais ou resposta bruta do provedor. |
 | `reconciliation_required` | `BOOLEAN`, obrigatório, padrão `false`; indica resultado externo indeterminado que exige reconciliação. |
 
+O contrato de uso desses campos está definido na
+[ADR-0001 — Metadados de processamento](docs/adr/0001-metadados-de-processamento.md),
+incluindo contagem antes do envio, próximo agendamento, validade do lease,
+proteção por versão e recuperação de resultado indeterminado. A preparação
+atômica ativa `reconciliation_required` preventivamente antes do HTTP; a gravação
+de resultado confirmado remove essa proteção na mesma atualização que conclui,
+encerra em falha ou agenda um retry seguro. Assim, uma queda entre envio e gravação
+do resultado não libera um reenvio automático. Claim, preparação, persistência de
+resultados e liberação de leases vencidos estão implementados conforme as seções
+abaixo. A integração HTTP continua pendente.
+
 `consumer_id` é diferente de `customer_id`: o primeiro identifica o sistema
 consumidor autenticado; o segundo identifica o cliente informado no pedido.
 A derivação de `consumer_id` da identidade confiável do JWT (por exemplo,
@@ -124,14 +145,16 @@ aceito do payload. Os DTOs públicos aceitam apenas `externalId`,
 Nenhuma das oito colunas internas deverá ser exposta na API.
 
 O schema, a entidade JPA e os DTOs estão implementados e cobertos por testes.
-Autenticação, endpoints, worker, retries, lease e reconciliação ainda estão
-pendentes. Os campos opcionais começam nulos; a sinalização de reconciliação
+Scheduler, chamada HTTP e reconciliação ainda estão pendentes.
+O claim atribui leases e recupera somente trabalho comprovadamente seguro;
+a preparação registra a tentativa antes do HTTP e a recuperação libera a posse vencida.
+Os campos opcionais começam nulos; a sinalização de reconciliação
 permitirá manter um resultado ambíguo em
-`PROCESSING`, sem adicionar estados públicos. O limite de tentativas será
-aplicado pelo processamento; a constraint do banco impede somente contagens
+`PROCESSING`, sem adicionar estados públicos. Claim, preparação e gravação de
+resultado aplicam o limite de três tentativas; a constraint do banco impede somente contagens
 negativas. A unicidade de `external_id` continua global, inclusive entre
-consumidores. Índices para consultas/claim serão definidos quando essas
-operações forem implementadas.
+consumidores. Os índices de listagem estão na V3; índices específicos para claim
+ainda não foram adicionados e dependerão da avaliação do plano e do volume de trabalho.
 
 `model.ActivationRequest` mapeia todas as colunas de V1/V2, com acesso JPA pelos
 campos e construtor sem argumentos `protected`, compatível com o Hibernate.
@@ -149,8 +172,9 @@ ocorrem por `startProcessing()` (`PENDING → PROCESSING`), `complete()`
 Transições inválidas lançam `InvalidActivationStatusTransitionException`;
 estados terminais não podem ser reabertos. `fail` exige texto não vazio de até
 100 caracteres para `last_error_code`; o chamador deve fornecer apenas um código
-categorizado, sem resposta bruta do provedor. As operações de retry, claim e reconciliação serão adicionadas
-com suas próprias regras; esta entidade ainda não implementa o processamento.
+categorizado, sem resposta bruta do provedor. Retry é registrado pelo serviço de
+resultados; reconciliação continua pendente. O claim usa SQL condicional no repositório, conforme
+descrito abaixo. Esta entidade ainda não implementa o protocolo de envio.
 
 `createdAt` e `updatedAt` usam `Instant`, com `@CreatedDate`, `@LastModifiedDate`
 e `AuditingEntityListener`. `JpaAuditingConfiguration` habilita a auditoria com
@@ -164,8 +188,8 @@ O campo `version` é `Long` com `@Version`: permanece nulo antes da primeira
 persistência (permitindo ao Spring Data reconhecer uma entidade nova mesmo com
 UUID atribuído), recebe `0` na inserção e é incrementado pelo Hibernate nas
 atualizações. Gravações com versão desatualizada são rejeitadas por lock otimista.
-Atualizações SQL diretas, como o futuro claim do worker, precisarão controlar
-explicitamente a versão e a auditoria, pois não passam pelos callbacks JPA.
+Atualizações SQL diretas, como o claim do worker, controlam explicitamente a
+versão e a auditoria, pois não passam pelos callbacks JPA.
 
 A V2 pressupõe a tabela `activation_requests` vazia, conforme o cenário atual
 de desenvolvimento. Não há proprietário padrão nem backfill inferido de
@@ -173,9 +197,171 @@ de desenvolvimento. Não há proprietário padrão nem backfill inferido de
 `consumer_id NOT NULL` falhará: será necessário planejar a atribuição dos
 proprietários antes de aplicar essa migração a um banco com dados.
 
-Os diretórios `infra/wiremock/mappings/`,
-`infra/wiremock/__files/` e `docs/adr/` também estão preparados, sem conteúdo além
-dos arquivos `.gitkeep`.
+Os diretórios `infra/wiremock/mappings/` e `infra/wiremock/__files/` também estão
+preparados, sem conteúdo além dos arquivos `.gitkeep`. As decisões técnicas
+estão em `docs/adr/`.
+
+## Aquisição atômica pelo worker
+
+`service.ActivationRequestClaimService.claimNext(workerId)` adquire no máximo
+uma solicitação e retorna `Optional<ClaimedActivationRequest>`, com `id`, versão
+resultante, `claimedBy` e `leaseUntil`. O identificador do worker deve conter texto
+não vazio de até 100 unidades UTF-16. A duração é configurada por
+`app.worker.lease-duration` / `WORKER_LEASE_DURATION`, com padrão `30s` e mínimo
+de um milissegundo; a duração efetiva usa milissegundos inteiros.
+
+A chamada ao bean Spring abre uma transação própria (`REQUIRES_NEW`), seleciona
+uma candidata por `created_at ASC, id ASC` com `FOR UPDATE SKIP LOCKED` e executa
+um `UPDATE` condicionado por ID, versão e elegibilidade. Linhas bloqueadas por
+outras transações são ignoradas. A operação exige exatamente uma linha afetada:
+zero produz resultado vazio; contagem inesperada lança exceção e reverte a
+transação. Sem candidata, também retorna vazio.
+
+A seleção e a atualização exigem ausência de lease válido, menos de três
+tentativas e `reconciliation_required=false`, além de uma destas condições:
+
+- `PENDING`, contador zero e sem agendamento;
+- `PROCESSING` com retry agendado já vencido;
+- `PROCESSING`, contador zero e sem agendamento, representando claim inicial
+  abandonado antes da preparação do envio.
+
+O PostgreSQL fornece `CURRENT_TIMESTAMP` para comparar agendamento e lease e
+atribuir `lease_until` e `updated_at`. Lease vencido inclui igualdade ao instante
+atual. A aquisição muda o status para `PROCESSING`, preenche os dois campos de
+posse e incrementa `version`. Preserva contador, agendamento de retry, último
+erro, sinalização de reconciliação e dados de criação. O contexto JPA é limpo
+após o SQL direto, e a releitura retorna os metadados efetivamente persistidos.
+O proxy Spring confirma o commit antes de entregar o resultado ao chamador,
+inclusive quando uma transação externa depois sofre rollback.
+
+O incremento explícito da versão no claim invalida entidades carregadas antes
+dele: tanto o flush de uma entidade gerenciada quanto o merge de uma entidade
+desatualizada são rejeitados pelo controle otimista, preservando a linha vencedora.
+Isso também vale quando um lease vencido é retomado pelo mesmo `workerId`:
+a versão identifica a nova posse. Uma versão antiga não volta a ser válida
+quando o lease expira novamente. Conflitos não devem ser contornados relendo a
+versão atual para repetir uma gravação com dados antigos.
+
+Os testes de integração com PostgreSQL verificam essa interação entre JPA e
+SQL nativo, o descarte da candidata no contexto JPA e a preservação de estados
+terminais quando conclusão e falha disputam a mesma versão.
+
+O claim sozinho não autoriza HTTP: a preparação descrita abaixo aplica as
+verificações de posse, versão e lease da ADR-0001. As escritas de resultado
+também aplicam essas verificações. Resultados indeterminados,
+tentativas esgotadas, retries futuros e estados terminais não são adquiridos.
+Não há nova migração nesta etapa.
+
+Referências: [locks e SKIP LOCKED no PostgreSQL](https://www.postgresql.org/docs/17/sql-select.html#SQL-FOR-UPDATE-SHARE)
+e [atualizações diretas no Spring Data JPA](https://docs.spring.io/spring-data/jpa/reference/jpa/query-methods.html#jpa.modifying-queries).
+
+## Preparação da tentativa e recuperação de leases
+
+`ActivationRequestAttemptService.prepareAttempt(claim)` recebe a fotografia
+retornada pelo claim e executa uma atualização condicional em transação própria
+(`REQUIRES_NEW`). Exige ID, versão e worker correspondentes, status `PROCESSING`,
+lease válido (`lease_until > CURRENT_TIMESTAMP`), menos de três tentativas,
+ausência de reconciliação e primeiro envio ou retry seguro já vencido.
+
+Na mesma atualização, incrementa `attempt_count`, remove `next_attempt_at`,
+ativa `reconciliation_required`, incrementa `version` e atualiza `updated_at`.
+Preserva o lease, os dados da solicitação e o último erro. Somente após o commit
+o chamador recebe `Optional<PreparedActivationAttempt>`, contendo ID, nova
+versão, worker, vencimento e número da tentativa. Essa versão deve ser usada na
+persistência do resultado; a versão do claim anterior ficou obsoleta.
+Resultado vazio ou falha no commit impede iniciar HTTP. A mesma preparação não
+pode ser usada para autorizar outro envio, inclusive em chamadas concorrentes.
+O futuro worker deverá chamar o provedor fora de transação de banco e respeitar
+o vencimento da posse; a preparação não renova o lease.
+
+`ActivationRequestLeaseRecoveryService.recoverExpiredLeases(batchSize)` libera
+até `batchSize` claims vencidos de solicitações `PROCESSING` e retorna a quantidade
+liberada. O lote deve ser positivo. A operação usa uma transação própria curta e
+um único SQL com seleção por `lease_until ASC, id ASC`, `FOR UPDATE SKIP LOCKED`
+e atualização condicionada por ID, versão, status e vencimento. Leases válidos,
+linhas sem lease e estados diferentes de `PROCESSING` ficam intactos.
+
+O recuperador remove `claimed_by` e `lease_until` juntos, incrementa `version`
+e atualiza `updated_at`. Preserva status, tentativas, próximo agendamento, último
+erro e sinalização de reconciliação. Zero significa que nenhum claim foi liberado;
+não significa que não existam linhas bloqueadas por outra transação. A operação
+pode ser repetida e executada por múltiplas instâncias sem liberar duas vezes a
+mesma posse. O claim também pode retomar diretamente trabalho seguro vencido,
+sem depender de uma execução prévia do recuperador.
+
+| Situação quando o lease vence | Após liberar a posse | Novo envio automático? |
+| --- | --- | --- |
+| Claim inicial abandonado antes da preparação | Contador `0`, sem agendamento, reconciliação `false`. | Pode adquirir novo claim e preparar a primeira tentativa. |
+| Claim de retry seguro abandonado antes da preparação | Contador e agendamento seguro preservados. | Somente quando o agendamento vencer e houver tentativas disponíveis. |
+| Queda depois do commit da preparação, inclusive antes da conexão HTTP | Contador incrementado, sem agendamento, reconciliação `true`. | Bloqueado até evidência externa confiável. |
+| Timeout ou resposta externa desconhecida | Continua `PROCESSING` com reconciliação `true`, inclusive na terceira tentativa. | Bloqueado; expiração não comprova ausência de ativação. |
+| Contador positivo sem agendamento e sem sinalização | Metadados preservados, sem evidência de retry seguro. | Bloqueado; exige avaliação operacional. |
+
+O relógio do PostgreSQL decide a validade: no instante exato de `lease_until`,
+a posse já venceu e não pode preparar uma tentativa. Uma recuperação ou novo
+claim invalida o worker anterior pela versão, mesmo se o identificador do worker
+for reutilizado. A liberação nunca converte uma expiração em `FAILED`, zera o
+contador ou remove a proteção de reconciliação.
+
+Sem consulta externa ou idempotência garantida pelo provedor, as tentativas
+indeterminadas exigem intervenção operacional; não há reconciliação automática
+ou endpoint para liberar reenvios. No shutdown, deve-se deixar expirar a posse
+de uma tentativa autorizada sem apagar sua sinalização preventiva. Nenhuma dessas
+operações promete efeito externo exatamente uma vez.
+
+Os serviços são operações internas disponíveis para o futuro worker; esta etapa
+não adiciona scheduler, HTTP nem renovação de lease.
+Os métodos básicos da entidade (`complete()` e `fail()`) continuam sem implementar
+o protocolo de resultado e não devem ser usados diretamente pelo futuro worker.
+Os metadados continuam ausentes dos DTOs públicos, sem alteração dos quatro status.
+
+## Resultados confirmados e agendamento de retries
+
+`ActivationRequestOutcomeService` recebe `PreparedActivationAttempt` e persiste
+o resultado em uma transação curta `REQUIRES_NEW`. Cada operação exige ID,
+versão, worker, status `PROCESSING`, lease válido, proteção de reconciliação ativa
+e o mesmo contador da tentativa preparada. Não incrementa novamente o contador.
+Na mesma atualização, libera os dois campos da posse, remove a proteção preventiva,
+incrementa `version` e atualiza `updated_at`.
+
+| Operação interna | Resultado persistido |
+| --- | --- |
+| `recordSuccess(attempt)` | `COMPLETED`, sem agendamento ou último erro. |
+| `recordPermanentFailure(attempt, errorCode)` | `FAILED`, sem agendamento, com código categorizado. |
+| `recordSafeTransientFailure(attempt, errorCode, retryAfter)` | Antes da terceira tentativa, `PROCESSING` com próximo instante futuro e erro; na terceira, `FAILED` sem agendamento. |
+
+As operações retornam `true` após o commit; `false` significa que nenhuma linha
+foi alterada, por exemplo por perda de posse ou resultado já registrado. Contagem
+inesperada lança exceção e reverte a transação. Resposta tardia após recuperação
+do lease não pode remover a proteção de reconciliação. A gravação de resultado
+indeterminado continua em `ActivationRequestAttemptService.recordAmbiguousOutcome`.
+
+`ActivationRetryPolicy` calcula a base `min(initialDelay * 2^(attemptCount - 1), maxDelay)`
+e adiciona jitter aleatório entre zero e `base * jitterRatio` (limite superior exclusivo,
+com truncamento para milissegundos). Por padrão, a primeira falha segura agenda
+em 1–1,25 s; a segunda, em 2–2,5 s. A terceira falha confirmada encerra em `FAILED`.
+O limite de 1 min vale para a base, antes do jitter; com os padrões e apenas
+três tentativas, esse teto não chega a ser atingido.
+
+| Variável | Padrão | Validação |
+| --- | --- | --- |
+| `WORKER_RETRY_INITIAL_DELAY` | `1s` | Pelo menos 1 ms. |
+| `WORKER_RETRY_MAX_DELAY` | `1m` | Maior ou igual ao atraso inicial. |
+| `WORKER_RETRY_JITTER_RATIO` | `0.25` | Número finito entre 0 e 1; zero desabilita jitter. |
+
+O PostgreSQL persiste `next_attempt_at = max(CURRENT_TIMESTAMP + atraso, retryAfter)`.
+`retryAfter` é um `Instant` opcional já interpretado pela futura integração HTTP;
+ausência ou data passada preserva o backoff positivo. Uma data futura posterior
+ao backoff é respeitada inclusive além do teto da base. O SQL também rejeita
+atrasos de retry menores que 1 ms. A data escolhida fica persistida: polling,
+reinício e novas tentativas de gravar o mesmo resultado não recalculam nem
+antecipam o agendamento. Não há espera com `Thread.sleep`.
+
+Retry seguro exige garantia de que a tentativa não ativou o produto. Código
+HTTP 500/503, timeout ou `Retry-After` isoladamente não fornecem essa garantia;
+sem ela, o chamador deve registrar resultado ambíguo e manter o bloqueio.
+A classificação de respostas e a interpretação do header continuam no escopo
+da futura integração HTTP. Nenhuma operação adiciona endpoint público.
 
 ## Contratos de entrada e saída
 
@@ -281,8 +467,140 @@ curl -i -X POST http://localhost:8080/api/v1/requests \
   --data '{"externalId":"EXT-12345","customerId":"CUST-10001","productCode":"INTERNET-500"}'
 ```
 
-JWT, escopos e a política HTTP para repetições de `externalId` ainda estão
-pendentes; a constraint de unicidade global continua garantida pelo PostgreSQL.
+JWT e escopos ainda estão pendentes. A unicidade global de `externalId` continua
+garantida pela constraint do PostgreSQL.
+
+Ao repetir o `POST` com o mesmo `externalId`, `customerId`, `productCode` e
+consumidor autenticado, a API responde `200 OK` com a representação atual do
+registro existente. A comparação é exata, sem trim ou conversão de maiúsculas.
+O ID, as datas, a versão e os metadados de processamento são preservados;
+o status pode ser `PENDING`, `PROCESSING`, `COMPLETED` ou `FAILED`, sem reiniciar
+a ativação nem chamar o provedor. O `Location` acompanha apenas o `201` da nova
+criação. Essa decisão permite reenviar um pedido após perder a resposta sem
+criar outro trabalho, mantendo a distinção entre criação e repetição.
+
+Conteúdo divergente ou colisão com outro consumidor retorna `409 Conflict`
+com `ProblemDetail` e a mensagem genérica `Activation request conflict`, sem
+alterar a linha original nem revelar sua representação ou proprietário.
+
+O conflito usa `Content-Type: application/problem+json`, sem header `Location`:
+
+```json
+{
+  "type": "about:blank",
+  "title": "Conflict",
+  "status": 409,
+  "detail": "Activation request conflict",
+  "instance": "/api/v1/requests"
+}
+```
+
+Por exemplo, após criar `EXT-12345` com `CUST-10001` e `INTERNET-500`, reenviar
+esse `externalId` com outro cliente ou produto resulta nesse erro. Espaços e
+diferenças entre maiúsculas e minúsculas também contam como divergência.
+A mesma resposta genérica é usada para colisões entre consumidores, mesmo
+quando cliente e produto coincidem, evitando revelar dados do registro existente.
+
+A consulta prévia e a releitura após colisão filtram por `externalId` e pelo
+consumidor autenticado no PostgreSQL, sem carregar o registro de outro consumidor.
+A constraint mantém a unicidade global: se o identificador pertencer a outro
+consumidor, a inserção falha e a API responde o mesmo `409` genérico, sem dados
+do banco ou do registro alheio. Esse `409` informa que o identificador não está
+disponível, mas não identifica o proprietário nem confirma cliente, produto ou status.
+
+### Por que consulta prévia ou `synchronized` não substituem unicidade no banco
+
+A consulta prévia evita inserções desnecessárias para o mesmo consumidor, mas
+o resultado descreve apenas o que estava visível naquele momento. Ela não reserva
+o `externalId`: outra transação pode inserir o mesmo valor antes do `save`.
+Essa janela entre verificar e gravar permite uma condição de corrida:
+
+| Passo | Requisição A | Requisição B |
+| --- | --- | --- |
+| 1 | Consulta `EXT-12345`: não encontra. | — |
+| 2 | — | Consulta `EXT-12345`: também não encontra. |
+| 3 | Insere `EXT-12345`, ainda sem commit. | — |
+| 4 | — | Tenta inserir o mesmo `externalId`. |
+
+Sem a constraint, ambas poderiam confirmar linhas com UUIDs diferentes e o mesmo
+`externalId`. Com `UNIQUE (external_id)`, o PostgreSQL faz B aguardar o desfecho
+da inserção de A: se A confirmar, B recebe uma violação de unicidade
+(SQLSTATE `23505`); se A fizer rollback, B pode prosseguir. Colocar consulta e
+inserção em um método `@Transactional`, por si só, não elimina essa corrida.
+
+O `synchronized` coordena apenas threads que adquirem o mesmo monitor na mesma
+JVM. Um método de instância sincronizado usa o monitor daquele objeto; mesmo um
+método `static synchronized` só coordena chamadas na mesma JVM. Duas réplicas
+da API, em processos ou contêineres distintos, têm monitores independentes e
+podem executar a sequência acima simultaneamente. Escritas por outros serviços,
+scripts ou SQL direto também não passam por esse monitor.
+
+Por isso, a garantia é a constraint `uk_activation_requests_external_id`, criada
+pelo Flyway na V1 e aplicada a todas as escritas na tabela, independentemente
+da instância ou do consumidor. A consulta prévia é uma otimização; a decisão
+final de aceitar a inserção pertence ao banco. O `@Version` protege atualizações
+concorrentes da mesma linha, mas não impede duas inserções com UUIDs distintos
+e o mesmo `externalId`.
+
+A inserção usa uma transação própria: se perder a disputa pela constraint
+`uk_activation_requests_external_id`, termina com
+rollback antes da releitura do registro confirmado. Essa releitura usa
+`REQUIRES_NEW` e `readOnly = true`, sem aderir a uma transação chamadora invalidada.
+Aplicam-se então as mesmas regras de `200` ou `409`. Se a releitura não encontrar
+um registro do consumidor autenticado, a resposta também será o `409` genérico,
+inclusive se a linha tiver sido removida entre a colisão e a releitura. Outras
+violações de integridade não são convertidas em repetição. Chamadas idênticas concorrentes
+produzem uma única linha, um `201` e `200` para as demais chamadas.
+
+### Idempotência da API e idempotência da operação externa
+
+Idempotência significa que repetir a mesma operação mantém o mesmo efeito de
+executá-la uma vez. No AtivaFlow, há duas fronteiras distintas:
+
+| Aspecto | Idempotência da API | Idempotência da operação externa |
+| --- | --- | --- |
+| Operação repetida | `POST /api/v1/requests` do consumidor para o AtivaFlow. | Chamada do AtivaFlow ao provedor para ativar o produto. |
+| Efeito protegido | Registro de uma única solicitação para o mesmo `externalId`. | Uma única ativação no provedor para a mesma operação lógica, mesmo com múltiplos envios. |
+| Garantia necessária | Constraint `UNIQUE (external_id)` e reutilização do registro quando consumidor, cliente e produto coincidem. | Contrato de idempotência implementado pelo provedor, com deduplicação ou operação naturalmente idempotente. |
+| Situação atual | Implementada na criação, inclusive para requisições concorrentes. | Integração ainda pendente; não há garantia de efeito externo exatamente uma vez. |
+
+Na API, a primeira criação retorna `201 Created`; uma repetição idêntica pelo
+mesmo consumidor retorna `200 OK`, com o mesmo ID e a representação atual,
+sem criar trabalho adicional ou reiniciar o processamento. A idempotência se
+refere ao efeito persistido: o código HTTP e o status retornado podem mudar.
+Dados divergentes ou outro consumidor usando o mesmo `externalId` recebem
+`409 Conflict`, pois a unicidade do identificador é global. Usar outro
+`externalId` cria outra solicitação, mesmo para o mesmo cliente e produto.
+
+Na operação externa, manter uma única linha no PostgreSQL não impede que duas
+chamadas HTTP produzam duas ativações. A transação local não abrange o efeito
+no provedor: ele pode concluir a ativação e a aplicação perder a resposta ou
+falhar antes de persistir `COMPLETED`. Claims, leases e controle de versão
+coordenam o processamento local, mas não eliminam essa janela de incerteza.
+
+Por exemplo, na futura integração:
+
+1. O consumidor envia `EXT-12345`, e a API persiste a solicitação com `201`.
+2. O worker prepara a tentativa, chama o provedor, e o provedor ativa o produto.
+3. A resposta se perde por timeout; o AtivaFlow não consegue confirmar o resultado.
+4. Repetir o `POST` original retorna `200` com a mesma solicitação; isso não
+   resolve a incerteza nem autoriza outro envio ao provedor.
+5. Reenviar a ativação sem garantia externa de idempotência pode duplicar o efeito.
+
+Uma futura integração com chave de idempotência deve reutilizar a mesma chave
+para a mesma operação em todas as tentativas, conforme o contrato do provedor,
+incluindo escopo, prazo de retenção e tratamento de payload divergente. Enviar
+`externalId` como campo ou header, por si só, não garante deduplicação externa.
+Uma consulta de reconciliação pode confirmar o resultado, mas não torna a
+operação de ativação idempotente.
+
+Enquanto essas garantias não existirem, o protocolo local marca
+`reconciliation_required = true` antes do HTTP e mantém resultados ambíguos em
+`PROCESSING`, bloqueados para reenvio automático, inclusive após expiração do
+lease ou esgotamento de tentativas. Timeout, HTTP 500/503 e `Retry-After`
+isoladamente não comprovam ausência de ativação. O retry seguro atual exige
+garantia de que a tentativa não ativou o produto. Casos indeterminados exigem
+intervenção operacional; não há reconciliação automática implementada.
 
 ## Consulta de solicitação
 
@@ -527,6 +845,19 @@ Para executar o build e os testes:
 bash ./mvnw -B --no-transfer-progress verify
 ```
 
+Em máquinas com pouca RAM, limite a memória do Maven e da JVM de testes e
+mantenha apenas um contexto Spring no cache. O comando abaixo executa a suíte
+completa; os contextos são recriados quando necessário:
+
+```bash
+MAVEN_OPTS='-Xmx256m -XX:MaxMetaspaceSize=192m' \
+  bash ./mvnw -B --no-transfer-progress clean verify \
+  -DforkCount=1 -Dspring.test.context.cache.maxSize=1 \
+  '-DargLine=-Xmx384m -XX:MaxMetaspaceSize=256m -XX:ActiveProcessorCount=2'
+```
+
+Esses limites são das JVMs; o PostgreSQL do Testcontainers também consome RAM.
+
 O teste `AtivaflowApiApplicationTests` verifica a inicialização do contexto com o
 perfil `test`, o acesso anônimo ao Swagger UI e seus recursos, os documentos
 OpenAPI, os metadados da API e a preservação das regras de acesso às demais rotas
@@ -536,9 +867,11 @@ imagem `postgres:17-alpine`, sem depender do banco ou das credenciais locais.
 servidor WireMock iniciado pelo próprio teste.
 `FlywayMigrationTests` verifica a aplicação e validação das migrações V1, V2 e V3,
 persistência dos campos públicos e internos, valores padrão, obrigatoriedade
-de proprietário não vazio, rejeição de contadores negativos, unicidade global
-de `external_id` entre consumidores e rejeição de status desconhecido no
-PostgreSQL real.
+de proprietário não vazio, rejeição de contadores negativos e rejeição de status
+desconhecido no PostgreSQL real. Para a unicidade global de `external_id`, consulta
+`pg_constraint` para conferir a constraint validada `UNIQUE (external_id)` e testa
+duplicatas com consumidor, cliente, produto e status iguais ou diferentes,
+exigindo o SQLSTATE `23505` (violação de unicidade).
 `ActivationRequestTests` verifica criação, validações, encapsulamento e transições
 de estado. `CreateActivationRequestTests` usa o validador Jakarta real para
 verificar obrigatoriedade (inclusive espaços Unicode), limites de 99/100/101
@@ -562,6 +895,36 @@ real, sem transação de teste, para verificar commit, `PENDING`, proprietário
 autenticado, auditoria, `201`, `Location` e os sete campos públicos. Também verifica
 `400` sem inserção para campos inválidos/controlados pelo servidor, além de
 preservação da autenticação e da proteção CSRF.
+Os testes de repetição cobrem os quatro status, comparando todos os campos
+armazenados antes e depois e exigindo zero chamadas ao WireMock. Também cobrem
+divergência de cliente/produto (incluindo espaços), colisão entre consumidores
+e criações paralelas com barreira de início. Um cenário mantém a primeira
+inserção em uma transação `REQUIRES_NEW` sem commit e libera três chamadas
+concorrentes com `CyclicBarrier`. Antes de confirmar a vencedora, consulta
+`pg_stat_activity` e `pg_blocking_pids` para exigir três inserções bloqueadas
+por ela, com conexões (`pid`) e transações (`backend_xid`) distintas. Isso
+comprova a recuperação após rollback na disputa real da constraint, sem mocks
+de repositório. A contagem global por `external_id` deve permanecer em uma linha.
+No cenário com quatro criações idênticas, exige exatamente um `201` com
+`Location`, três `200` sem `Location` e corpos iguais; uma consulta posterior
+confirma que a representação está persistida e acessível após o commit.
+
+Para executar apenas esses cenários de concorrência (requer Docker):
+
+```bash
+bash ./mvnw -B --no-transfer-progress \
+  '-Dtest=CreateActivationRequestEndpointTests#concurrentIdenticalRequestsCreateOneRecordAndReturnItToEveryCaller+requestsLosingUniqueConstraintRaceApplyRepetitionRulesAfterRollback' test
+```
+
+O contrato de conflito exige os cinco campos de Problem Details, sem campos
+extras ou `Location`, nos quatro status, mesmo com os metadados internos de
+processamento preenchidos, preservando todos os campos persistidos. Após uma
+colisão entre consumidores, os testes exigem `404` na consulta individual e
+listagem sem o registro alheio ou seus totais; o consumidor recusado ainda pode
+criar outra solicitação e o proprietário pode repetir a original com `200`.
+A disputa real da constraint também cobre cliente, produto, ambos os campos e
+consumidor divergentes: as chamadas perdedoras recebem
+`409`, preservando todos os campos da linha vencedora e sem chamar o provedor.
 Os contratos HTTP também cobrem campos obrigatórios ausentes, corpo vazio ou
 JSON inválido, rejeição de propriedades desconhecidas e de todos os metadados
 controlados pelo servidor, inclusive timestamps válidos enviados pelo cliente.
@@ -594,6 +957,48 @@ criação e atualização.
 `ActivationRequestQueryTests` captura o SQL real das quatro combinações de
 filtros e verifica o escopo de consumidor no conteúdo e na contagem, predicados
 apenas para filtros presentes e paginação/ordenação no banco.
+
+`ActivationRequestClaimTests` usa PostgreSQL real para verificar disputa entre
+oito workers pela mesma linha, avanço sobre outra linha quando a primeira está
+bloqueada, commit independente do chamador, elegibilidade, recuperação segura,
+preservação dos metadados, versão/auditoria e igualdade no vencimento de lease e
+retry. Também exige zero linhas afetadas para versão obsoleta ou trabalho
+inelegível. `ActivationRequestClaimServiceTests` verifica que zero linhas não
+concede posse, que contagens inesperadas falham e que identificadores inválidos
+e leases sem duração positiva suficiente são rejeitados.
+
+`ActivationRequestLeaseRecoveryTests` verifica liberação de trabalho abandonado,
+preservação da ambiguidade e do retry seguro, limite e ordem do lote, concorrência
+entre recuperadores, linhas bloqueadas, commit independente, descarte da entidade
+gerenciada e igualdade no vencimento. `ActivationRequestAttemptTests` cobre a
+preparação atômica, retomada antes/depois dela, terceira tentativa, preparação
+concorrente, lease vencido/ausente, worker ou versão incorretos, retry futuro,
+reconciliação, estados terminais e commit independente. Os testes usam PostgreSQL
+real e simulam a passagem do tempo no banco, sem `sleep`. A suíte unitária
+`ActivationRequestAttemptServiceTests` verifica que zero linhas ou uma contagem
+inesperada nunca autoriza envio.
+
+`ActivationRequestAttemptService.recordAmbiguousOutcome` registra o resultado
+indeterminado de uma tentativa preparada, com posse, versão e lease válidos.
+Mantém `PROCESSING` e `reconciliation_required=true`, salva o código categorizado,
+remove o agendamento e libera a posse em transação independente. Nem a terceira
+tentativa nem a expiração do lease autorizam retry ou encerramento em `FAILED`.
+Sem garantia documentada de idempotência ou consulta de reconciliação no provedor,
+a solicitação aguarda intervenção operacional; não há liberação automática.
+Se o worker perdeu a posse, a operação retorna `false` e mantém a proteção
+preventiva persistida antes do HTTP. O cliente HTTP e sua integração com essa
+operação continuam pendentes, conforme o [ADR-0001](docs/adr/0001-metadados-de-processamento.md).
+`ActivationRequestAmbiguousOutcomeTests` verifica o bloqueio nas três tentativas,
+rejeição de escritas sem posse válida, resposta tardia após recuperação e commit
+independente no PostgreSQL real. A operação não expõe endpoint público.
+
+`ActivationRequestOutcomeTests` verifica o ciclo completo das três falhas seguras,
+agendamento futuro, `Retry-After`, ausência de novo claim antes do prazo,
+resultados terminais, posse inválida, resposta tardia, concorrência entre resultados,
+commit independente e continuidade de outras pendências. Usa PostgreSQL real,
+sem `sleep`. `ActivationRetryPolicyTests` verifica crescimento, teto, jitter e
+configurações inválidas; `ActivationRequestOutcomeServiceTests` cobre validação
+dos códigos de erro e contagens de linhas sem confirmação de gravação.
 
 Também é possível executar a aplicação com o PostgreSQL do Testcontainers e o
 perfil `test` por meio de `TestAtivaflowApiApplication`:

@@ -29,6 +29,12 @@ server:
   shutdown: graceful
 
 app:
+  worker:
+    lease-duration: ${WORKER_LEASE_DURATION:30s}
+    retry:
+      initial-delay: ${WORKER_RETRY_INITIAL_DELAY:1s}
+      max-delay: ${WORKER_RETRY_MAX_DELAY:1m}
+      jitter-ratio: ${WORKER_RETRY_JITTER_RATIO:0.25}
   activation-provider:
     # Reserva de configuração; a autenticação depende do contrato do provedor.
     api-key: ${ACTIVATION_PROVIDER_API_KEY:}
