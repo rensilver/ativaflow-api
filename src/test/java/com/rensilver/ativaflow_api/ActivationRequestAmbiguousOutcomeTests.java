@@ -121,13 +121,13 @@ class ActivationRequestAmbiguousOutcomeTests {
 	}
 
 	@Test
-	void lateResponseAfterLeaseRecoveryKeepsTheExistingReconciliationBlock() {
+	void lateResponseAfterLeaseExpiryKeepsTheExistingReconciliationBlock() {
 		var attempt = prepare(0);
 		jdbc.update("UPDATE activation_requests SET lease_until = CURRENT_TIMESTAMP - INTERVAL '1 second' WHERE id = ?",
 				attempt.id());
-		assertThat(recovery.recoverExpiredLeases(10)).isEqualTo(1);
 		var before = jdbc.queryForMap("SELECT * FROM activation_requests WHERE id = ?", attempt.id());
 
+		assertThat(recovery.recoverExpiredLeases(10)).isZero();
 		assertThat(attempts.recordAmbiguousOutcome(attempt, "PROVIDER_TIMEOUT")).isFalse();
 
 		assertThat(claims.claimNext("worker-a")).isEmpty();

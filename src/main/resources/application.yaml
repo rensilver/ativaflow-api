@@ -26,6 +26,8 @@ server:
 
 app:
   worker:
+    enabled: ${WORKER_ENABLED:true}
+    poll-interval: ${WORKER_POLL_INTERVAL:250ms}
     lease-duration: ${WORKER_LEASE_DURATION:30s}
     retry:
       max-attempts: ${WORKER_RETRY_MAX_ATTEMPTS:3}

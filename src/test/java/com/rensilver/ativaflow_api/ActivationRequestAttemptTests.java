@@ -109,15 +109,15 @@ class ActivationRequestAttemptTests {
 
 		// Mesmo sem HTTP, uma queda após o commit não prova ausência de ativação externa.
 		expire(id);
-		assertThat(recovery.recoverExpiredLeases(10)).isEqualTo(1);
+		assertThat(recovery.recoverExpiredLeases(10)).isZero();
 
 		assertThat(claims.claimNext("worker-b")).isEmpty();
 		var stored = repository.findById(id).orElseThrow();
 		assertThat(stored.getStatus().name()).isEqualTo("PROCESSING");
 		assertThat(stored.isReconciliationRequired()).isTrue();
 		assertThat(stored.getAttemptCount()).isEqualTo(1);
-		assertThat(stored.getLeaseUntil()).isNull();
-		assertThat(stored.getClaimedBy()).isNull();
+		assertThat(stored.getLeaseUntil()).isNotNull();
+		assertThat(stored.getClaimedBy()).isEqualTo("worker-a");
 	}
 
 	@ParameterizedTest

@@ -274,8 +274,9 @@ versão, worker, vencimento e número da tentativa. Essa versão deve ser usada 
 persistência do resultado; a versão do claim anterior ficou obsoleta.
 Resultado vazio ou falha no commit impede iniciar HTTP. A mesma preparação não
 pode ser usada para autorizar outro envio, inclusive em chamadas concorrentes.
-O futuro worker deverá chamar o provedor fora de transação de banco e respeitar
-o vencimento da posse; a preparação não renova o lease.
+`ActivationRequestWorker` chama o provedor somente depois que claim e preparação
+confirmam seus commits, fora de transação de banco, e respeita o vencimento da
+posse; a preparação não renova o lease.
 
 `ActivationRequestLeaseRecoveryService.recoverExpiredLeases(batchSize)` libera
 até `batchSize` claims vencidos de solicitações `PROCESSING` e retorna a quantidade
@@ -348,6 +349,9 @@ três tentativas, esse teto não chega a ser atingido.
 
 | Variável | Padrão | Validação |
 | --- | --- | --- |
+| `WORKER_ENABLED` | `true` | Liga ou desliga o worker de polling. |
+| `WORKER_POLL_INTERVAL` | `250ms` | Intervalo entre varreduras do trabalho persistido. |
+| `WORKER_LEASE_DURATION` | `30s` | Posse temporária usada pelo claim; deve ser maior que zero. |
 | `WORKER_RETRY_MAX_ATTEMPTS` | `3` | Inteiro de 1 a 3; inclui a primeira tentativa. `1` desabilita reenvios. |
 | `WORKER_RETRY_INITIAL_DELAY` | `1s` | Pelo menos 1 ms. |
 | `WORKER_RETRY_MAX_DELAY` | `1m` | Maior ou igual ao atraso inicial. |
@@ -429,7 +433,8 @@ Nenhum campo de resposta é obrigatório; não há schema de erro presumido.
 | `204` (padrão), `200` ou `201` | Confirmam conclusão no contrato simulado: `COMPLETED`, sem retry; corpo dispensável. |
 | `202 Accepted` | Não confirma conclusão; `PROCESSING` com reconciliação, sem reenvio automático. |
 | `400` | No mock, rejeição permanente sem ativação: `FAILED`, sem retry. |
-| `500`, `429` ou `503` | **Somente no contrato do mock**, garantem não ativação: até três tentativas totais, com backoff, jitter e `Retry-After` válido; terceira falha segura encerra em `FAILED`. |
+| `500` | Efeito potencialmente aplicado: `PROCESSING` com reconciliação, sem reenvio automático. |
+| `429` ou `503` | **Somente no contrato do mock**, garantem não ativação: até três tentativas totais, com backoff, jitter e `Retry-After` válido; terceira falha segura encerra em `FAILED`. |
 | Timeout, resposta não contratada ou erro sem garantia de não ativação | `PROCESSING` com reconciliação, sem retry automático. |
 
 A garantia do mock não se transfere a um provedor real ao mudar a URL base.
@@ -439,13 +444,22 @@ A ADR detalha campos, headers, `Retry-After`, limites e critérios futuros de te
 
 O cliente traduz essa matriz para `ProviderOutcome`, com códigos internos
 `PROVIDER_REJECTED`, `PROVIDER_TEMPORARILY_UNAVAILABLE`,
-`PROVIDER_UNCONFIRMED_RESPONSE` e `PROVIDER_COMMUNICATION_FAILURE`.
+`PROVIDER_INTERNAL_ERROR_OUTCOME_UNKNOWN`, `PROVIDER_UNCONFIRMED_RESPONSE` e
+`PROVIDER_COMMUNICATION_FAILURE`.
 Os corpos de resposta são ignorados. Em falhas transitórias contratadas,
 `Retry-After` aceita segundos inteiros não negativos e data HTTP RFC 1123;
 valores inválidos ou datas passadas produzem `Optional.empty()`. Um prazo futuro
 válido é preservado, mesmo acima do teto de backoff. Overflow na representação
 do prazo produz `Indeterminate(PROVIDER_RETRY_AFTER_OUT_OF_RANGE)`.
 O agendamento e a persistência desses resultados continuam a cargo da aplicação.
+
+Para HTTP `400`, o worker encaminha `PermanentFailure` ao
+`ActivationRequestOutcomeService.recordPermanentFailure`: a solicitação termina
+em `FAILED` na tentativa atual, inclusive após falhas transitórias anteriores.
+O banco armazena somente `PROVIDER_REJECTED` em `last_error_code`, remove o
+agendamento e libera a posse, sem exigir reconciliação. O corpo da resposta e
+`Retry-After` são ignorados; a justificativa permanece interna, ausente dos DTOs
+públicos. A gravação exige posse, versão e lease válidos, como os demais resultados.
 
 ## Contratos de entrada e saída
 
@@ -523,7 +537,11 @@ construtor do record.
 ## Criação de solicitações
 
 `POST /api/v1/requests` recebe os três identificadores descritos acima. O serviço
-cria a entidade pela factory de domínio e persiste uma linha em uma transação.
+cria a entidade pela factory de domínio e persiste uma linha em uma transação
+`REQUIRES_NEW`. A linha `PENDING` é também o trabalho durável: o scheduler do
+worker consulta pendências no banco, então reinícios não perdem o processamento.
+Como o claim usa sua própria transação e só encontra linhas visíveis no banco,
+o trabalho só pode começar depois do commit da criação.
 O proprietário (`consumerId`) vem de `Principal.getName()`, conforme a identidade
 autenticada pelo Spring Security. O corpo não pode definir esse valor.
 
@@ -531,10 +549,10 @@ Após o commit, a API responde `201 Created`, com
 `Location: /api/v1/requests/{id}` e os sete campos de `ActivationRequestResponse`.
 O UUID é gerado pelo servidor; `createdAt` e `updatedAt` são preenchidos pela
 auditoria JPA e expostos em UTC. A resposta é a fotografia imutável da criação
-em `PENDING`. A criação não chama o provedor nem inicia processamento externo.
-Esse corpo conserva o status e as datas da criação mesmo que um processamento
-posterior avance o registro antes de o JSON ser enviado. O `201` confirma a
-criação persistida; a conclusão da ativação pertence à etapa de processamento.
+em `PENDING`. O serviço de criação não espera a chamada externa. O worker pode
+iniciar após o commit e avançar o registro antes de o JSON ser enviado; o corpo
+mantém o status e as datas originais. O `201` confirma a criação persistida; a
+conclusão da ativação pertence ao worker.
 Dados inválidos, propriedades desconhecidas ou campos controlados pelo servidor
 no JSON resultam em `400 Bad Request`, sem inserção.
 
@@ -1070,8 +1088,8 @@ após persistência e consulta. A URI de `Location` é consultada após o `POST`
 os corpos da criação, consulta e listagem devem preservar os mesmos campos e
 timestamps UTC com precisão de microssegundos.
 Dois cenários adicionais protegem o contrato de criação: WireMock configurado
-com atraso e `503` recebe zero chamadas durante o `POST`; um advice exclusivo
-do teste simula o worker via SQL após o commit e antes da serialização,
+com atraso e `503` recebe zero chamadas pelo caminho síncrono do `POST`; um advice
+exclusivo do teste simula o worker via SQL após o commit e antes da serialização,
 avançando a linha até `COMPLETED` e alterando `updatedAt`. O JSON continua em
 `PENDING`, com as datas originais. Essa simulação não implementa o worker nem
 usa esperas para coordenar a execução.
@@ -1135,6 +1153,12 @@ commit independente e continuidade de outras pendências. Usa PostgreSQL real,
 sem `sleep`. `ActivationRetryPolicyTests` verifica crescimento, teto, jitter e
 configurações inválidas; `ActivationRequestOutcomeServiceTests` cobre validação
 dos códigos de erro e contagens de linhas sem confirmação de gravação.
+
+`ActivationRequestProviderRejectionTests` cobre HTTP `400` com WireMock, worker,
+serviços transacionais e PostgreSQL reais. Os cenários exigem `FAILED` na primeira,
+segunda e terceira tentativas, `PROVIDER_REJECTED` sem dados sensíveis, ausência de
+agendamento mesmo com `Retry-After` e nenhuma nova chamada por outro worker.
+A consulta pública deve mostrar `FAILED` sem expor a justificativa interna.
 
 Também é possível executar a aplicação com o PostgreSQL do Testcontainers e o
 perfil `test` por meio de `TestAtivaflowApiApplication`:

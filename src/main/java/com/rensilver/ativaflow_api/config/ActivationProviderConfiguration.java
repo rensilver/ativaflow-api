@@ -1,7 +1,6 @@
 package com.rensilver.ativaflow_api.config;
 
 import java.net.http.HttpClient;
-import java.time.Clock;
 
 import com.rensilver.ativaflow_api.client.provider.HttpActivationProviderClient;
 import org.springframework.boot.context.properties.EnableConfigurationProperties;
@@ -17,7 +16,7 @@ public class ActivationProviderConfiguration {
 
 	@Bean
 	HttpActivationProviderClient activationProviderClient(RestClient.Builder builder,
-			ActivationProviderProperties properties, ClientHttpRequestFactorySettings settings, Clock clock) {
+			ActivationProviderProperties properties, ClientHttpRequestFactorySettings settings) {
 		var providerSettings = settings
 				.withConnectTimeout(properties.connectTimeout())
 				.withReadTimeout(properties.readTimeout())
@@ -30,7 +29,7 @@ public class ActivationProviderConfiguration {
 				.baseUrl(properties.baseUrl().toString())
 				.requestFactory(requestFactory)
 				.build();
-		return new HttpActivationProviderClient(restClient, clock);
+		return new HttpActivationProviderClient(restClient);
 	}
 
 }

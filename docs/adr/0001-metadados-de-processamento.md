@@ -69,8 +69,9 @@ chamada remota após uma falha do processo.
 
 O limite é de **3 tentativas totais**, incluindo a primeira. A política de retry
 calcula backoff exponencial com jitter e respeita `Retry-After`
-válido; persiste o instante escolhido, sem espera com `Thread.sleep`. Nem um
-HTTP 500/503 nem o esgotamento do contador confirmam ausência de ativação.
+válido quando a resposta comprova não ativação; persiste o instante escolhido,
+sem espera com `Thread.sleep`. HTTP 429/500/503, timeout e esgotamento do
+contador não confirmam ausência de ativação por si sós.
 Resultado indeterminado permanece em `PROCESSING`, mesmo na terceira tentativa.
 O backoff inicia em 1 s, dobra por tentativa e limita a base a 1 min, com jitter
 adicional de até 25%, configuráveis em `app.worker.retry`. O jitter não reduz a
@@ -113,14 +114,19 @@ Se a sinalização estiver ativa, a linha continua bloqueada para envio. Renovar
 lease não autoriza repetir uma tentativa; se uma chamada ainda estiver em curso,
 a sinalização preventiva impede outro worker de enviar novamente.
 
-A liberação abrange somente `PROCESSING` com lease não nulo e vencido, incluindo
-igualdade ao relógio do banco. Remove os dois campos de posse juntos e incrementa
-versão/auditoria. Não transforma expiração em falha nem presume ausência de efeito
-externo, mesmo quando o limite de tentativas foi atingido. Sem agendamento seguro,
-contador positivo e sinalização inativa também não autorizam retomada automática.
-Lotes positivos limitam o trabalho de cada transação; linhas bloqueadas são
-ignoradas e podem ser tratadas na próxima execução. O claim seguro também pode
-retomar diretamente uma posse vencida, sem liberação prévia.
+A liberação automática abrange somente `PROCESSING` com lease não nulo e vencido,
+incluindo igualdade ao relógio do banco, contador abaixo do limite, sinalização
+de reconciliação inativa e uma autorização segura: tentativa inicial ainda não
+preparada (`attempt_count=0`, sem agendamento) ou retry já agendado e vencido.
+Remove os dois campos de posse juntos e incrementa versão/auditoria, preservando
+contador, agendamento, erro e sinalização. Expiração nunca transforma em falha
+nem presume ausência de efeito externo. Resultado ambíguo, retry não agendado ou
+contador esgotado mantêm a posse persistida como evidência operacional e não
+podem ser retomados automaticamente. Lotes positivos limitam o trabalho de cada
+transação; linhas bloqueadas são ignoradas e podem ser tratadas na próxima
+execução. O claim seguro também pode retomar diretamente uma posse vencida, sem
+liberação prévia. Solicitações `PENDING` persistidas ficam disponíveis ao polling
+do worker após o startup; nenhuma transição de recuperação é necessária.
 
 Reconciliação exige evidência confiável do resultado externo: ativação confirmada
 permite `COMPLETED`; falha permanente confirmada permite `FAILED`; não ativação
@@ -180,10 +186,12 @@ lease, reinício, `Retry-After` e limite de tentativas não removem esse bloquei
 Uma futura integração HTTP deve registrar timeout de conexão/leitura e qualquer
 resposta sem certeza do efeito externo por essa operação, sem agendar retry.
 
-`ActivationRequestLeaseRecoveryService.recoverExpiredLeases` libera a posse vencida
-em lotes, com CTE, `FOR UPDATE SKIP LOCKED` e atualização condicional na mesma
-transação própria curta. Preserva todos os metadados de segurança e retorna a
-quantidade liberada. Não possui agendamento automático nesta etapa.
+`ActivationRequestLeaseRecoveryService.recoverExpiredLeases` libera somente posse
+vencida com reenvio comprovadamente seguro, em lotes, com CTE, `FOR UPDATE SKIP
+LOCKED` e atualização condicional na mesma transação própria curta. Preserva os
+metadados de segurança e retorna a quantidade liberada. Claims ambíguos ou sem
+retry seguro permanecem intactos. O worker retoma `PENDING` persistido pelo
+polling configurado após o startup; não há rotina separada de startup.
 
 `ActivationRequestAttemptTests` e `ActivationRequestLeaseRecoveryTests` verificam
 a fronteira antes/depois da preparação, a retomada pelo mesmo worker, preservação
@@ -195,7 +203,8 @@ bloqueadas, preservação dos dados e commit independente em PostgreSQL real.
 indeterminado nas três tentativas, ausência de novo claim/preparação, repetição
 da escrita sem efeito, continuidade de outras pendências, commit independente
 e rejeição de versão/worker incorretos, lease ausente/vencido (inclusive no limite),
-estados incompatíveis e resposta tardia após recuperação. Usa PostgreSQL real.
+estados incompatíveis e resposta tardia após expiração do lease, preservando
+todos os dados mesmo após executar a recuperação. Usa PostgreSQL real.
 
 `ActivationRequestOutcomeService` grava sucesso, falha permanente e falha
 transitória comprovadamente segura em transações `REQUIRES_NEW`. A atualização
@@ -219,7 +228,7 @@ vencimento exato do lease, liberação e commit independente em PostgreSQL real.
 Os testes unitários cobrem a política de atraso, sua configuração, validação dos
 códigos de erro e contagens de linhas inesperadas.
 
-HTTP, renovação, scheduler e reconciliação continuam pendentes.
+HTTP real, renovação de lease e reconciliação continuam pendentes.
 As demais relações entre colunas não possuem enforcement completo
 no banco ou nos métodos da entidade. Os métodos atuais
 `startProcessing()`, `complete()` e `fail()` cuidam das transições básicas;

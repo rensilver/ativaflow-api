@@ -212,10 +212,10 @@ class ActivationRequestOutcomeTests {
 	}
 
 	@Test
-	void responseAfterLeaseRecoveryCannotClearTheReconciliationProtection() {
+	void responseAfterExpiredLeaseCannotClearTheReconciliationProtection() {
 		var attempt = prepare(0);
 		jdbc.update("UPDATE activation_requests SET lease_until = CURRENT_TIMESTAMP - INTERVAL '1 second' WHERE id = ?", attempt.id());
-		assertThat(recovery.recoverExpiredLeases(1)).isEqualTo(1);
+		assertThat(recovery.recoverExpiredLeases(1)).isZero();
 		var before = jdbc.queryForMap("SELECT * FROM activation_requests WHERE id = ?", attempt.id());
 		assertThat(outcomes.recordSuccess(attempt)).isFalse();
 		assertThat(outcomes.recordSafeTransientFailure(attempt, "PROVIDER_BUSY", null)).isFalse();
