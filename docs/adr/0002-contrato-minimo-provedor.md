@@ -73,7 +73,7 @@ da classificação. Não persistir nem registrar a resposta bruta.
 | `200 OK` ou `201 Created` | Alternativas de sucesso assumidas para compatibilidade com o mock; também confirmam conclusão, com corpo dispensável e ignorado. | `COMPLETED`; sem retry. |
 | `202 Accepted` | Apenas aceitação; não confirma conclusão. Está fora do retorno de sucesso contratado. | `PROCESSING`, `reconciliation_required=true`; sem reenvio automático. |
 | `400 Bad Request` | No mock, rejeição permanente da entrada antes de qualquer ativação. | `FAILED`; sem retry. |
-| `500 Internal Server Error` | **Somente no mock**, falha transitória sem ativação. | Retry seguro; `PROCESSING` antes da terceira tentativa e `FAILED` na terceira falha segura. |
+| `500 Internal Server Error` | O status não confirma se o produto foi ativado. | `PROCESSING` com reconciliação; sem reenvio automático. |
 | `429 Too Many Requests` ou `503 Service Unavailable` | **Somente no mock**, recusa transitória sem ativação, com `Retry-After` opcional. | Mesmo limite de retry seguro; respeitar `Retry-After` válido. |
 | Timeout de conexão/leitura, conexão interrompida ou ausência de resposta confiável | Efeito externo desconhecido. | `PROCESSING`, `reconciliation_required=true`; sem reenvio automático, inclusive na terceira tentativa. |
 | Demais respostas não contratadas, incluindo outros `2xx` e redirecionamentos, ou erro de provedor real sem garantia contratual de não ativação | Evidência insuficiente sobre o efeito externo. | `PROCESSING`, `reconciliation_required=true`; sem reenvio automático; revisar o contrato para classificar com segurança. |
@@ -84,11 +84,11 @@ ainda não concluído ([RFC 9110, seção 15.3.3](https://www.rfc-editor.org/rfc
 O mock padrão deverá usar `204`. Nenhum endpoint de consulta externa ou callback
 é presumido para resolver `202` ou timeout.
 
-A garantia de não ativação em `500/429/503` pertence ao **contrato simulado**, não
-ao significado genérico desses códigos. Alterar a URL base para um provedor real
-não transfere essa garantia. A futura implementação deve manter essa premissa
-explícita na classificação da integração e comprovada pelos cenários do mock.
-Corpo vazio e `Retry-After` isoladamente não provam ausência de ativação.
+A garantia de não ativação em `429/503` pertence ao **contrato simulado**, não
+ao significado genérico desses códigos. O `500` é sempre tratado como resultado
+indeterminado, pois pode ocorrer após a ativação. Alterar a URL base para um
+provedor real não transfere a garantia do mock para `429/503`. Corpo vazio e
+`Retry-After` isoladamente não provam ausência de ativação.
 
 ## Retry e resultado indeterminado
 
@@ -130,7 +130,8 @@ público como contrato externo e tratar qualquer erro HTTP como autorização de
 
 Na implementação, verificar com WireMock iniciado pelos próprios testes: método,
 caminho, headers e os três campos exatos; sucesso sem corpo; erros com e sem corpo;
-`202`; `500/429/503` seguros apenas conforme contrato; formatos de `Retry-After`;
+`202`; `500` indeterminado e `429/503` seguros apenas conforme contrato;
+formatos de `Retry-After`;
 timeouts e ausência de retries cegos. Verificar com persistência real o limite de
 três tentativas e a preservação de resultados indeterminados. Esses cenários são
 critérios futuros, não testes já entregues nesta decisão.

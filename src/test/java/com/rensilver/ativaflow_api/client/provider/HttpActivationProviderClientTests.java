@@ -120,11 +120,12 @@ class HttpActivationProviderClientTests {
 	}
 
 	@ParameterizedTest
-	@CsvSource({"0,2026-10-29T12:00:00Z", "120,2026-10-29T12:02:00Z",
-			"'Thu, 29 Oct 2026 12:05:00 GMT',2026-10-29T12:05:00Z"})
-	void interpretsRetryAfterWithoutTruncatingTheProviderDeadline(String header, Instant expected,
+	@CsvSource({"429,0,2026-10-29T12:00:00Z", "503,120,2026-10-29T12:02:00Z",
+			"429,'Thu, 29 Oct 2026 12:05:00 GMT',2026-10-29T12:05:00Z",
+			"503,'Thu, 29 Oct 2026 12:05:00 GMT',2026-10-29T12:05:00Z"})
+	void interpretsRetryAfterWithoutTruncatingTheProviderDeadline(int status, String header, Instant expected,
 			WireMockRuntimeInfo wireMock) {
-		stubFor(post(PATH).willReturn(aResponse().withStatus(429).withHeader("Retry-After", header)));
+		stubFor(post(PATH).willReturn(aResponse().withStatus(status).withHeader("Retry-After", header)));
 		assertOutcome(wireMock, new ProviderOutcome.TransientFailure("PROVIDER_TEMPORARILY_UNAVAILABLE", Optional.of(expected)));
 	}
 
