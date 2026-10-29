@@ -11,6 +11,8 @@ import com.rensilver.ativaflow_api.service.ActivationRequestOutcomeHandler;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Component;
+import org.springframework.transaction.annotation.Propagation;
+import org.springframework.transaction.annotation.Transactional;
 
 /** Polls durable pending requests; each database step commits before the next one runs. */
 @Component
@@ -36,6 +38,7 @@ public class ActivationRequestWorker {
 
 	/** Runs after the configured delay and drains all currently available work. */
 	@Scheduled(fixedDelayString = "${app.worker.poll-interval:250ms}")
+	@Transactional(propagation = Propagation.NOT_SUPPORTED)
 	public void poll() {
 		while (processNext()) {
 			// Keep claiming until no eligible item remains.
@@ -43,6 +46,7 @@ public class ActivationRequestWorker {
 	}
 
 	/** Returns true when a candidate was claimed, even if its preparation became stale. */
+	@Transactional(propagation = Propagation.NOT_SUPPORTED)
 	public boolean processNext() {
 		var claim = claims.claimNext(workerId);
 		if (claim.isEmpty()) {

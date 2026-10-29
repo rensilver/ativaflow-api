@@ -19,6 +19,8 @@ import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.InOrder;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
+import org.springframework.transaction.annotation.AnnotationTransactionAttributeSource;
+import org.springframework.transaction.annotation.Propagation;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.anyString;
@@ -82,5 +84,17 @@ class ActivationRequestWorkerTests {
 		assertThat(worker.processNext()).isTrue();
 		verify(provider, never()).activate(org.mockito.ArgumentMatchers.any());
 		verify(repository, org.mockito.Mockito.never()).findById(ID);
+	}
+
+	@Test
+	void suspendsCallerTransactionsWhilePollingAndProcessing() throws NoSuchMethodException {
+		var transactionAttributes = new AnnotationTransactionAttributeSource();
+
+		assertThat(transactionAttributes.getTransactionAttribute(
+				ActivationRequestWorker.class.getMethod("poll"), ActivationRequestWorker.class)
+				.getPropagationBehavior()).isEqualTo(Propagation.NOT_SUPPORTED.value());
+		assertThat(transactionAttributes.getTransactionAttribute(
+				ActivationRequestWorker.class.getMethod("processNext"), ActivationRequestWorker.class)
+				.getPropagationBehavior()).isEqualTo(Propagation.NOT_SUPPORTED.value());
 	}
 }
