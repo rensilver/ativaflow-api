@@ -369,7 +369,23 @@ O contrato de saída de `POST /provider/v1/activate` está definido na
 [ADR-0002 — Contrato mínimo de ativação no provedor](docs/adr/0002-contrato-minimo-provedor.md).
 O enunciado não fornece schema completo e não existe contrato oficial adicional;
 as decisões abaixo são suposições confirmadas para o projeto e seu mock.
-Cliente HTTP, DTOs de integração, mappings WireMock e worker continuam pendentes.
+O contrato Java está disponível em `client.provider.ActivationProviderClient`,
+com a operação `ProviderOutcome activate(ActivationProviderRequest request)`.
+`ActivationProviderRequest`, em `client.provider.dto`, contém somente os três
+campos de negócio, recebidos já validados e preservados sem normalização.
+Interface e modelos usam apenas Java e tipos próprios, sem dependências de
+HTTP, Spring, entidade JPA ou DTOs públicos.
+
+`domain.ProviderOutcome` representa quatro resultados tipados: `Success`,
+`PermanentFailure`, `TransientFailure` e `Indeterminate`. Falhas carregam apenas
+um código interno categorizado. `TransientFailure` exige garantia contratual de
+não ativação e pode informar `Optional<Instant> retryAfter`, já interpretado pela
+integração. `Indeterminate` exige reconciliação e não autoriza reenvio automático.
+Cada chamada representa uma única tentativa, fora de transação de banco;
+persistência, limite de tentativas e agendamento continuam a cargo da aplicação.
+
+Cliente HTTP, classificação de respostas, metadados de correlação, mappings
+WireMock e worker continuam pendentes.
 
 A chamada envia `Content-Type: application/json` e apenas os três valores
 persistidos, sem normalização:
