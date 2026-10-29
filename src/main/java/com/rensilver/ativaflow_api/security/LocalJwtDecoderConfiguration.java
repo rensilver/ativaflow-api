@@ -20,6 +20,7 @@ import org.springframework.security.oauth2.jwt.JwtIssuerValidator;
 import org.springframework.security.oauth2.jwt.JwtValidators;
 import org.springframework.security.oauth2.jwt.NimbusJwtDecoder;
 import org.springframework.util.Assert;
+import org.springframework.util.StringUtils;
 
 /** Chave pública RSA local, sem emissão de tokens ou dependência de um IdP em desenvolvimento. */
 @Configuration(proxyBeanMethods = false)
@@ -33,6 +34,8 @@ public class LocalJwtDecoderConfiguration {
 	JwtDecoder localJwtDecoder(OAuth2ResourceServerProperties properties) throws IOException {
 		var jwt = properties.getJwt();
 		Assert.hasText(jwt.getIssuerUri(), "spring.security.oauth2.resourceserver.jwt.issuer-uri must be configured");
+		Assert.isTrue(!StringUtils.hasText(jwt.getJwkSetUri()),
+				"Configure only one of public-key-location or jwk-set-uri for local JWT validation");
 		try (var input = jwt.getPublicKeyLocation().getInputStream()) {
 			var decoder = NimbusJwtDecoder.withPublicKey(RsaKeyConverters.x509().convert(input)).build();
 			var validators = new ArrayList<OAuth2TokenValidator<Jwt>>();

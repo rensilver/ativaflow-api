@@ -1164,10 +1164,16 @@ a aplicação:
 set -a
 source .env
 set +a
+export JWT_DEMO_DIR="$(java scripts/LocalJwt.java create)"
+source "$JWT_DEMO_DIR/env.sh"
 bash ./mvnw spring-boot:run
 ```
 
 Os arquivos `.env` locais são ignorados pelo Git; `.env.example` é versionado.
+O utilitário gera chaves e um token de cinco minutos em diretório temporário fora
+do Git. Veja o [roteiro JWT local](docs/local-jwt.md) para o modo JWKS, chamadas
+autenticadas, renovação e remoção dos arquivos ao terminar. O roteiro exige Bash
+e permissões POSIX (Linux/macOS); o modo JWKS usa também Python 3.
 
 ### Provedor simulado no Compose
 
@@ -1255,13 +1261,15 @@ dependem das próximas etapas e do contrato adotado.
 
 Veja [Configuração JWT e demonstração local](docs/resource-server.md) para variáveis
 de ambiente, JWKS, audience e geração de chave/token efêmeros fora do repositório.
+O [roteiro executável de PEM/JWKS](docs/local-jwt.md) usa o utilitário Java 21
+`scripts/LocalJwt.java`, sem dependências adicionais para gerar o material.
 Sem configuração de um decoder confiável, a aplicação não inicia.
 
 Os testes unitários novos exercitam a configuração e seus filtros em memória,
 com tokens realmente assinados, sem Spring Boot, banco, Docker ou rede:
 
 ```bash
-bash ./mvnw -Dtest=StatelessResourceServerUnitTests,LocalJwtDecoderUnitTests test
+bash ./mvnw -Dtest=ResourceServerSecurityConfigurationUnitTests,LocalJwtDecoderUnitTests test
 ```
 
 ## Testes e integração contínua

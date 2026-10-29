@@ -65,7 +65,7 @@ class SecurityProblemHandlerUnitTests {
 		var request = request("GET");
 		request.addHeader(HttpHeaders.AUTHORIZATION, "Bearer secret");
 		var response = new MockHttpServletResponse();
-		var filter = new BearerTokenAuthenticationFilter(authentication -> {
+		var filter = new BearerTokenAuthenticationFilter((org.springframework.security.core.Authentication authentication) -> {
 			throw new InvalidBearerTokenException("token=secret");
 		});
 		filter.setAuthenticationEntryPoint(handler);
