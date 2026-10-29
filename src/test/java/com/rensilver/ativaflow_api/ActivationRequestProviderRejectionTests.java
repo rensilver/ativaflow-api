@@ -1,5 +1,6 @@
 package com.rensilver.ativaflow_api;
 
+import java.time.Instant;
 import java.util.UUID;
 
 import com.github.tomakehurst.wiremock.junit5.WireMockExtension;
@@ -12,6 +13,7 @@ import com.rensilver.ativaflow_api.service.ActivationRequestClaimService;
 import com.rensilver.ativaflow_api.service.ActivationRequestOutcomeHandler;
 import com.rensilver.ativaflow_api.worker.ActivationRequestWorker;
 import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.RegisterExtension;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
@@ -122,5 +124,33 @@ class ActivationRequestProviderRejectionTests {
 				.andExpect(jsonPath("$.status").value("FAILED"))
 				.andExpect(jsonPath("$.length()").value(7))
 				.andExpect(jsonPath("$.lastErrorCode").doesNotExist());
+	}
+
+	@Test
+	void safeUnavailableResponsesScheduleAndStopAfterThreeTotalAttempts() {
+		provider.stubFor(post(PATH).willReturn(aResponse().withStatus(503)));
+		var request = repository.saveAndFlush(ActivationRequest.create(
+				"EXT-" + UUID.randomUUID(), "CUSTOMER-1", "PRODUCT-1", "consumer-a"));
+		var worker = new ActivationRequestWorker(claims, attempts, outcomes, client, repository);
+
+		for (int attempt = 1; attempt <= 3; attempt++) {
+			assertThat(worker.processNext()).isTrue();
+			var stored = repository.findById(request.getId()).orElseThrow();
+			assertThat(stored.getAttemptCount()).isEqualTo(attempt);
+			assertThat(stored.getLastErrorCode()).isEqualTo("PROVIDER_TEMPORARILY_UNAVAILABLE");
+			assertThat(stored.isReconciliationRequired()).isFalse();
+			if (attempt < 3) {
+				assertThat(stored.getStatus()).isEqualTo(ActivationStatus.PROCESSING);
+				assertThat(stored.getNextAttemptAt()).isAfter(Instant.now());
+				jdbc.update("UPDATE activation_requests SET next_attempt_at = CURRENT_TIMESTAMP WHERE id = ?",
+						request.getId());
+			} else {
+				assertThat(stored.getStatus()).isEqualTo(ActivationStatus.FAILED);
+				assertThat(stored.getNextAttemptAt()).isNull();
+			}
+		}
+
+		assertThat(worker.processNext()).isFalse();
+		provider.verify(3, postRequestedFor(urlEqualTo(PATH)));
 	}
 }
