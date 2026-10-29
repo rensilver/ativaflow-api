@@ -1,5 +1,7 @@
 package com.rensilver.ativaflow_api.client.provider;
 
+import java.net.SocketTimeoutException;
+import java.net.http.HttpTimeoutException;
 import java.time.Clock;
 import java.time.DateTimeException;
 import java.time.Instant;
@@ -50,9 +52,22 @@ public class HttpActivationProviderClient implements ActivationProviderClient {
 					});
 		}
 		catch (RestClientException exception) {
-			// Nunca propagar corpo bruto, credenciais ou mensagens do transporte ao domínio.
-			return new ProviderOutcome.Indeterminate("PROVIDER_COMMUNICATION_FAILURE");
+			// Timeout não prova que o provedor deixou de efetivar a ativação.
+			return new ProviderOutcome.Indeterminate(isTimeout(exception)
+					? "PROVIDER_TIMEOUT" : "PROVIDER_COMMUNICATION_FAILURE");
 		}
+	}
+
+	private static boolean isTimeout(Throwable failure) {
+		for (Throwable cause = failure; cause != null; cause = cause.getCause()) {
+			if (cause instanceof HttpTimeoutException || cause instanceof SocketTimeoutException) {
+				return true;
+			}
+			if (cause.getCause() == cause) {
+				break;
+			}
+		}
+		return false;
 	}
 
 	private ProviderOutcome safeTransientFailure(@Nullable String retryAfter) {

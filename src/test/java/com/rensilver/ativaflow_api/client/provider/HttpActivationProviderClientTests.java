@@ -149,7 +149,7 @@ class HttpActivationProviderClientTests {
 		contextRunner.withPropertyValues("app.activation-provider.base-url=" + wireMock.getHttpBaseUrl(),
 				"app.activation-provider.connect-timeout=200ms", "app.activation-provider.read-timeout=100ms")
 				.run(context -> assertThat(context.getBean(ActivationProviderClient.class).activate(REQUEST))
-						.isEqualTo(new ProviderOutcome.Indeterminate("PROVIDER_COMMUNICATION_FAILURE")));
+						.isEqualTo(new ProviderOutcome.Indeterminate("PROVIDER_TIMEOUT")));
 		verify(1, postRequestedFor(urlEqualTo(PATH)));
 	}
 
