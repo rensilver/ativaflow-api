@@ -158,6 +158,24 @@ A transação `REQUIRES_NEW` confirma antes de retornar `PreparedActivationAttem
 com a nova versão e o número da tentativa. Zero linhas retorna vazio, sem autorizar
 HTTP; contagem inesperada reverte a transação. A preparação não renova o lease.
 
+`ActivationRequestAttemptService.recordAmbiguousOutcome` registra o resultado
+indeterminado de uma tentativa preparada, usando sua versão e seu worker. Exige
+`PROCESSING`, lease ainda válido e proteção preventiva ativa. Em transação
+`REQUIRES_NEW`, persiste apenas o código categorizado, mantém
+`reconciliation_required=true`, remove qualquer agendamento e libera os dois
+campos de posse, incrementando versão/auditoria. Não altera o contador nem
+encerra em `FAILED`, inclusive na terceira tentativa. Retorna `false` sem alterar
+a linha quando a posse foi perdida; nesse caso, a sinalização gravada antes do
+HTTP continua protegendo a solicitação. Contagem inesperada reverte a transação.
+
+Não há garantia documentada de idempotência nem consulta de reconciliação no
+provedor. Portanto, resultado ambíguo permanece bloqueado para intervenção
+operacional, sem prazo de liberação automática. `external_id` único protege a
+criação local, mas não comprova idempotência do efeito externo. Expiração de
+lease, reinício, `Retry-After` e limite de tentativas não removem esse bloqueio.
+Uma futura integração HTTP deve registrar timeout de conexão/leitura e qualquer
+resposta sem certeza do efeito externo por essa operação, sem agendar retry.
+
 `ActivationRequestLeaseRecoveryService.recoverExpiredLeases` libera a posse vencida
 em lotes, com CTE, `FOR UPDATE SKIP LOCKED` e atualização condicional na mesma
 transação própria curta. Preserva todos os metadados de segurança e retorna a
@@ -169,8 +187,14 @@ da ambiguidade na terceira tentativa, limites de tempo, concorrência, linhas
 bloqueadas, preservação dos dados e commit independente em PostgreSQL real.
 `ActivationRequestAttemptServiceTests` cobre contagens de linhas sem autorização.
 
-HTTP, renovação, persistência de resultados, scheduler e reconciliação continuam
-pendentes. As demais relações entre colunas não possuem enforcement completo
+`ActivationRequestAmbiguousOutcomeTests` verifica persistência do resultado
+indeterminado nas três tentativas, ausência de novo claim/preparação, repetição
+da escrita sem efeito, continuidade de outras pendências, commit independente
+e rejeição de versão/worker incorretos, lease ausente/vencido (inclusive no limite),
+estados incompatíveis e resposta tardia após recuperação. Usa PostgreSQL real.
+
+HTTP, renovação, persistência de resultados confirmados, scheduler e reconciliação
+continuam pendentes. As demais relações entre colunas não possuem enforcement completo
 no banco ou nos métodos da entidade. Os métodos atuais
 `startProcessing()`, `complete()` e `fail()` cuidam das transições básicas;
 não implementam o protocolo de posse e envio desta decisão.

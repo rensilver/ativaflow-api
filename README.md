@@ -859,6 +859,20 @@ real e simulam a passagem do tempo no banco, sem `sleep`. A suíte unitária
 `ActivationRequestAttemptServiceTests` verifica que zero linhas ou uma contagem
 inesperada nunca autoriza envio.
 
+`ActivationRequestAttemptService.recordAmbiguousOutcome` registra o resultado
+indeterminado de uma tentativa preparada, com posse, versão e lease válidos.
+Mantém `PROCESSING` e `reconciliation_required=true`, salva o código categorizado,
+remove o agendamento e libera a posse em transação independente. Nem a terceira
+tentativa nem a expiração do lease autorizam retry ou encerramento em `FAILED`.
+Sem garantia documentada de idempotência ou consulta de reconciliação no provedor,
+a solicitação aguarda intervenção operacional; não há liberação automática.
+Se o worker perdeu a posse, a operação retorna `false` e mantém a proteção
+preventiva persistida antes do HTTP. O cliente HTTP e sua integração com essa
+operação continuam pendentes, conforme o [ADR-0001](docs/adr/0001-metadados-de-processamento.md).
+`ActivationRequestAmbiguousOutcomeTests` verifica o bloqueio nas três tentativas,
+rejeição de escritas sem posse válida, resposta tardia após recuperação e commit
+independente no PostgreSQL real. A operação não expõe endpoint público.
+
 Também é possível executar a aplicação com o PostgreSQL do Testcontainers e o
 perfil `test` por meio de `TestAtivaflowApiApplication`:
 

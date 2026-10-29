@@ -101,6 +101,22 @@ public interface ActivationRequestRepository extends JpaRepository<ActivationReq
 	int tryPrepareAttempt(@Param("id") UUID id, @Param("expectedVersion") long expectedVersion,
 			@Param("workerId") String workerId);
 
+	/** Resultado desconhecido não agenda retry nem encerra a solicitação por esgotamento de tentativas. */
+	@Transactional(propagation = Propagation.MANDATORY)
+	@Modifying(clearAutomatically = true, flushAutomatically = true)
+	@Query(value = """
+			UPDATE activation_requests
+			SET reconciliation_required = true, next_attempt_at = NULL, last_error_code = :errorCode,
+			    claimed_by = NULL, lease_until = NULL,
+			    version = version + 1, updated_at = CURRENT_TIMESTAMP
+			WHERE id = :id AND version = :expectedVersion
+			  AND status = 'PROCESSING' AND claimed_by = :workerId
+			  AND lease_until > CURRENT_TIMESTAMP
+			  AND reconciliation_required = true AND attempt_count > 0
+			""", nativeQuery = true)
+	int tryRecordAmbiguousOutcome(@Param("id") UUID id, @Param("expectedVersion") long expectedVersion,
+			@Param("workerId") String workerId, @Param("errorCode") String errorCode);
+
 	Optional<ActivationRequest> findByIdAndConsumerId(UUID id, String consumerId);
 
 	@Transactional(readOnly = true)
