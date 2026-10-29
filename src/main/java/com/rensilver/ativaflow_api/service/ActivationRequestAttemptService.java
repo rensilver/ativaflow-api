@@ -4,6 +4,8 @@ import java.util.Objects;
 import java.util.Optional;
 
 import com.rensilver.ativaflow_api.repository.ActivationRequestRepository;
+import com.rensilver.ativaflow_api.service.model.ClaimedActivationRequest;
+import com.rensilver.ativaflow_api.service.model.PreparedActivationAttempt;
 import org.springframework.lang.Nullable;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Propagation;

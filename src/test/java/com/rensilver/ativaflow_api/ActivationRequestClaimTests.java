@@ -14,7 +14,7 @@ import com.rensilver.ativaflow_api.config.JpaAuditingConfiguration;
 import com.rensilver.ativaflow_api.model.ActivationRequest;
 import com.rensilver.ativaflow_api.repository.ActivationRequestRepository;
 import com.rensilver.ativaflow_api.service.ActivationRequestClaimService;
-import com.rensilver.ativaflow_api.service.ClaimedActivationRequest;
+import com.rensilver.ativaflow_api.service.model.ClaimedActivationRequest;
 import jakarta.persistence.EntityManagerFactory;
 import jakarta.persistence.OptimisticLockException;
 import org.junit.jupiter.api.BeforeEach;

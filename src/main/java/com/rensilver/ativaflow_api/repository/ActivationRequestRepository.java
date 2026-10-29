@@ -1,5 +1,6 @@
 package com.rensilver.ativaflow_api.repository;
 
+import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Optional;
@@ -116,6 +117,36 @@ public interface ActivationRequestRepository extends JpaRepository<ActivationReq
 			""", nativeQuery = true)
 	int tryRecordAmbiguousOutcome(@Param("id") UUID id, @Param("expectedVersion") long expectedVersion,
 			@Param("workerId") String workerId, @Param("errorCode") String errorCode);
+
+	/** Somente resultado confirmado pode remover a proteção preventiva e, se seguro, agendar retry. */
+	@Transactional(propagation = Propagation.MANDATORY)
+	@Modifying(clearAutomatically = true, flushAutomatically = true)
+	@Query(value = """
+			UPDATE activation_requests
+			SET status = CASE
+			        WHEN :success THEN 'COMPLETED'
+			        WHEN :retryable AND attempt_count < 3 THEN 'PROCESSING'
+			        ELSE 'FAILED' END,
+			    next_attempt_at = CASE
+			        WHEN :retryable AND NOT :success AND attempt_count < 3
+			        THEN GREATEST(CURRENT_TIMESTAMP + (:delayMillis * INTERVAL '1 millisecond'),
+			                      CAST(:retryAfter AS TIMESTAMP WITH TIME ZONE))
+			        ELSE NULL END,
+			    reconciliation_required = false, last_error_code = :errorCode,
+			    claimed_by = NULL, lease_until = NULL,
+			    version = version + 1, updated_at = CURRENT_TIMESTAMP
+			WHERE id = :id AND version = :expectedVersion
+			  AND status = 'PROCESSING' AND claimed_by = :workerId
+			  AND lease_until > CURRENT_TIMESTAMP
+			  AND reconciliation_required = true AND attempt_count BETWEEN 1 AND 3
+			  AND attempt_count = :attemptCount
+			  AND (NOT :retryable OR :success OR attempt_count = 3 OR :delayMillis >= 1)
+			""", nativeQuery = true)
+	int tryRecordConfirmedOutcome(@Param("id") UUID id, @Param("expectedVersion") long expectedVersion,
+			@Param("workerId") String workerId, @Param("attemptCount") int attemptCount,
+			@Param("success") boolean success, @Param("retryable") boolean retryable,
+			@Param("errorCode") @Nullable String errorCode, @Param("delayMillis") long delayMillis,
+			@Param("retryAfter") @Nullable Instant retryAfter);
 
 	Optional<ActivationRequest> findByIdAndConsumerId(UUID id, String consumerId);
 

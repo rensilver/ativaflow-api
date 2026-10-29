@@ -12,6 +12,7 @@ import com.rensilver.ativaflow_api.exception.InvalidPaginationException;
 import com.rensilver.ativaflow_api.mapper.ActivationRequestMapper;
 import com.rensilver.ativaflow_api.model.ActivationRequest;
 import com.rensilver.ativaflow_api.repository.ActivationRequestRepository;
+import com.rensilver.ativaflow_api.service.model.CreateActivationRequestResult;
 import lombok.RequiredArgsConstructor;
 import org.hibernate.exception.ConstraintViolationException;
 import org.springframework.dao.DataIntegrityViolationException;

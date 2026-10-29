@@ -13,7 +13,7 @@ import com.rensilver.ativaflow_api.repository.ActivationRequestRepository;
 import com.rensilver.ativaflow_api.service.ActivationRequestAttemptService;
 import com.rensilver.ativaflow_api.service.ActivationRequestClaimService;
 import com.rensilver.ativaflow_api.service.ActivationRequestLeaseRecoveryService;
-import com.rensilver.ativaflow_api.service.ClaimedActivationRequest;
+import com.rensilver.ativaflow_api.service.model.ClaimedActivationRequest;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;

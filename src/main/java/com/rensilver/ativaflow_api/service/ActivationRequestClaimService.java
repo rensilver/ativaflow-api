@@ -5,6 +5,7 @@ import java.util.Objects;
 import java.util.Optional;
 
 import com.rensilver.ativaflow_api.repository.ActivationRequestRepository;
+import com.rensilver.ativaflow_api.service.model.ClaimedActivationRequest;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.lang.Nullable;
 import org.springframework.stereotype.Service;

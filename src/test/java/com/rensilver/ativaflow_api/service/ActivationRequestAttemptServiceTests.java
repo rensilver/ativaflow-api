@@ -4,6 +4,8 @@ import java.time.Instant;
 import java.util.UUID;
 
 import com.rensilver.ativaflow_api.repository.ActivationRequestRepository;
+import com.rensilver.ativaflow_api.service.model.ClaimedActivationRequest;
+import com.rensilver.ativaflow_api.service.model.PreparedActivationAttempt;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.junit.jupiter.params.ParameterizedTest;

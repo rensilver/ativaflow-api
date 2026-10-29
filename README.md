@@ -35,6 +35,8 @@ Pacote base: `com.rensilver.ativaflow_api`.
 | `config` | Configurações Spring e propriedades da aplicação. |
 | `controller` | Endpoints REST, validação de entrada e respostas HTTP. |
 | `service` | Orquestração dos casos de uso e delimitação de transações. |
+| `service.model` | Resultados e fotografias imutáveis do processamento dos serviços. |
+| `service.policy` | Políticas de execução, como cálculo de backoff e jitter. |
 | `repository` | Acesso a dados com Spring Data JPA e operações de persistência. |
 | `domain` | Regras, estados e resultados de negócio. |
 | `domain.exception` | Exceções de regras e transições de domínio. |
@@ -50,6 +52,9 @@ Pacote base: `com.rensilver.ativaflow_api`.
 | `observability` | Correlação, métricas e suporte a tracing. |
 
 `AtivaflowApiApplication.java` contém o ponto de entrada da aplicação.
+
+A análise de responsabilidades, dependências e fronteiras transacionais da camada
+de serviços está em [Responsabilidades dos serviços](docs/service-responsibilities.md).
 
 ## Arquivos de configuração
 
@@ -123,12 +128,12 @@ O contrato de uso desses campos está definido na
 [ADR-0001 — Metadados de processamento](docs/adr/0001-metadados-de-processamento.md),
 incluindo contagem antes do envio, próximo agendamento, validade do lease,
 proteção por versão e recuperação de resultado indeterminado. A preparação
-atômica implementada ativa `reconciliation_required` preventivamente antes do
-HTTP; o futuro processador só poderá limpar a sinalização ao persistir um
-resultado conhecido. Assim, uma queda entre envio e gravação do resultado não
-libera um reenvio automático. Claim, preparação e liberação de leases vencidos
-estão implementados conforme as seções abaixo. HTTP e persistência do resultado
-ainda estão pendentes.
+atômica ativa `reconciliation_required` preventivamente antes do HTTP; a gravação
+de resultado confirmado remove essa proteção na mesma atualização que conclui,
+encerra em falha ou agenda um retry seguro. Assim, uma queda entre envio e gravação
+do resultado não libera um reenvio automático. Claim, preparação, persistência de
+resultados e liberação de leases vencidos estão implementados conforme as seções
+abaixo. A integração HTTP continua pendente.
 
 `consumer_id` é diferente de `customer_id`: o primeiro identifica o sistema
 consumidor autenticado; o segundo identifica o cliente informado no pedido.
@@ -140,13 +145,13 @@ aceito do payload. Os DTOs públicos aceitam apenas `externalId`,
 Nenhuma das oito colunas internas deverá ser exposta na API.
 
 O schema, a entidade JPA e os DTOs estão implementados e cobertos por testes.
-Scheduler, chamada HTTP, agendamento de retries e reconciliação ainda estão pendentes.
+Scheduler, chamada HTTP e reconciliação ainda estão pendentes.
 O claim atribui leases e recupera somente trabalho comprovadamente seguro;
 a preparação registra a tentativa antes do HTTP e a recuperação libera a posse vencida.
 Os campos opcionais começam nulos; a sinalização de reconciliação
 permitirá manter um resultado ambíguo em
-`PROCESSING`, sem adicionar estados públicos. O limite de tentativas será
-aplicado pelo processamento; a constraint do banco impede somente contagens
+`PROCESSING`, sem adicionar estados públicos. Claim, preparação e gravação de
+resultado aplicam o limite de três tentativas; a constraint do banco impede somente contagens
 negativas. A unicidade de `external_id` continua global, inclusive entre
 consumidores. Os índices de listagem estão na V3; índices específicos para claim
 ainda não foram adicionados e dependerão da avaliação do plano e do volume de trabalho.
@@ -167,8 +172,8 @@ ocorrem por `startProcessing()` (`PENDING → PROCESSING`), `complete()`
 Transições inválidas lançam `InvalidActivationStatusTransitionException`;
 estados terminais não podem ser reabertos. `fail` exige texto não vazio de até
 100 caracteres para `last_error_code`; o chamador deve fornecer apenas um código
-categorizado, sem resposta bruta do provedor. Retry e reconciliação serão adicionados
-com suas próprias regras; o claim usa SQL condicional no repositório, conforme
+categorizado, sem resposta bruta do provedor. Retry é registrado pelo serviço de
+resultados; reconciliação continua pendente. O claim usa SQL condicional no repositório, conforme
 descrito abaixo. Esta entidade ainda não implementa o protocolo de envio.
 
 `createdAt` e `updatedAt` usam `Instant`, com `@CreatedDate`, `@LastModifiedDate`
@@ -242,8 +247,8 @@ SQL nativo, o descarte da candidata no contexto JPA e a preservação de estados
 terminais quando conclusão e falha disputam a mesma versão.
 
 O claim sozinho não autoriza HTTP: a preparação descrita abaixo aplica as
-verificações de posse, versão e lease da ADR-0001. As futuras escritas de resultado
-também deverão aplicá-las. Resultados indeterminados,
+verificações de posse, versão e lease da ADR-0001. As escritas de resultado
+também aplicam essas verificações. Resultados indeterminados,
 tentativas esgotadas, retries futuros e estados terminais não são adquiridos.
 Não há nova migração nesta etapa.
 
@@ -263,7 +268,7 @@ ativa `reconciliation_required`, incrementa `version` e atualiza `updated_at`.
 Preserva o lease, os dados da solicitação e o último erro. Somente após o commit
 o chamador recebe `Optional<PreparedActivationAttempt>`, contendo ID, nova
 versão, worker, vencimento e número da tentativa. Essa versão deve ser usada na
-futura persistência do resultado; a versão do claim anterior ficou obsoleta.
+persistência do resultado; a versão do claim anterior ficou obsoleta.
 Resultado vazio ou falha no commit impede iniciar HTTP. A mesma preparação não
 pode ser usada para autorizar outro envio, inclusive em chamadas concorrentes.
 O futuro worker deverá chamar o provedor fora de transação de banco e respeitar
@@ -305,10 +310,58 @@ de uma tentativa autorizada sem apagar sua sinalização preventiva. Nenhuma des
 operações promete efeito externo exatamente uma vez.
 
 Os serviços são operações internas disponíveis para o futuro worker; esta etapa
-não adiciona scheduler, HTTP, renovação de lease nem gravação de resultado.
+não adiciona scheduler, HTTP nem renovação de lease.
 Os métodos básicos da entidade (`complete()` e `fail()`) continuam sem implementar
 o protocolo de resultado e não devem ser usados diretamente pelo futuro worker.
 Os metadados continuam ausentes dos DTOs públicos, sem alteração dos quatro status.
+
+## Resultados confirmados e agendamento de retries
+
+`ActivationRequestOutcomeService` recebe `PreparedActivationAttempt` e persiste
+o resultado em uma transação curta `REQUIRES_NEW`. Cada operação exige ID,
+versão, worker, status `PROCESSING`, lease válido, proteção de reconciliação ativa
+e o mesmo contador da tentativa preparada. Não incrementa novamente o contador.
+Na mesma atualização, libera os dois campos da posse, remove a proteção preventiva,
+incrementa `version` e atualiza `updated_at`.
+
+| Operação interna | Resultado persistido |
+| --- | --- |
+| `recordSuccess(attempt)` | `COMPLETED`, sem agendamento ou último erro. |
+| `recordPermanentFailure(attempt, errorCode)` | `FAILED`, sem agendamento, com código categorizado. |
+| `recordSafeTransientFailure(attempt, errorCode, retryAfter)` | Antes da terceira tentativa, `PROCESSING` com próximo instante futuro e erro; na terceira, `FAILED` sem agendamento. |
+
+As operações retornam `true` após o commit; `false` significa que nenhuma linha
+foi alterada, por exemplo por perda de posse ou resultado já registrado. Contagem
+inesperada lança exceção e reverte a transação. Resposta tardia após recuperação
+do lease não pode remover a proteção de reconciliação. A gravação de resultado
+indeterminado continua em `ActivationRequestAttemptService.recordAmbiguousOutcome`.
+
+`ActivationRetryPolicy` calcula a base `min(initialDelay * 2^(attemptCount - 1), maxDelay)`
+e adiciona jitter aleatório entre zero e `base * jitterRatio` (limite superior exclusivo,
+com truncamento para milissegundos). Por padrão, a primeira falha segura agenda
+em 1–1,25 s; a segunda, em 2–2,5 s. A terceira falha confirmada encerra em `FAILED`.
+O limite de 1 min vale para a base, antes do jitter; com os padrões e apenas
+três tentativas, esse teto não chega a ser atingido.
+
+| Variável | Padrão | Validação |
+| --- | --- | --- |
+| `WORKER_RETRY_INITIAL_DELAY` | `1s` | Pelo menos 1 ms. |
+| `WORKER_RETRY_MAX_DELAY` | `1m` | Maior ou igual ao atraso inicial. |
+| `WORKER_RETRY_JITTER_RATIO` | `0.25` | Número finito entre 0 e 1; zero desabilita jitter. |
+
+O PostgreSQL persiste `next_attempt_at = max(CURRENT_TIMESTAMP + atraso, retryAfter)`.
+`retryAfter` é um `Instant` opcional já interpretado pela futura integração HTTP;
+ausência ou data passada preserva o backoff positivo. Uma data futura posterior
+ao backoff é respeitada inclusive além do teto da base. O SQL também rejeita
+atrasos de retry menores que 1 ms. A data escolhida fica persistida: polling,
+reinício e novas tentativas de gravar o mesmo resultado não recalculam nem
+antecipam o agendamento. Não há espera com `Thread.sleep`.
+
+Retry seguro exige garantia de que a tentativa não ativou o produto. Código
+HTTP 500/503, timeout ou `Retry-After` isoladamente não fornecem essa garantia;
+sem ela, o chamador deve registrar resultado ambíguo e manter o bloqueio.
+A classificação de respostas e a interpretação do header continuam no escopo
+da futura integração HTTP. Nenhuma operação adiciona endpoint público.
 
 ## Contratos de entrada e saída
 
@@ -872,6 +925,14 @@ operação continuam pendentes, conforme o [ADR-0001](docs/adr/0001-metadados-de
 `ActivationRequestAmbiguousOutcomeTests` verifica o bloqueio nas três tentativas,
 rejeição de escritas sem posse válida, resposta tardia após recuperação e commit
 independente no PostgreSQL real. A operação não expõe endpoint público.
+
+`ActivationRequestOutcomeTests` verifica o ciclo completo das três falhas seguras,
+agendamento futuro, `Retry-After`, ausência de novo claim antes do prazo,
+resultados terminais, posse inválida, resposta tardia, concorrência entre resultados,
+commit independente e continuidade de outras pendências. Usa PostgreSQL real,
+sem `sleep`. `ActivationRetryPolicyTests` verifica crescimento, teto, jitter e
+configurações inválidas; `ActivationRequestOutcomeServiceTests` cobre validação
+dos códigos de erro e contagens de linhas sem confirmação de gravação.
 
 Também é possível executar a aplicação com o PostgreSQL do Testcontainers e o
 perfil `test` por meio de `TestAtivaflowApiApplication`:

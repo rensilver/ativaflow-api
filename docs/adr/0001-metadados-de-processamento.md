@@ -7,8 +7,8 @@ Data: 2026-10-29. Decisão: aceita para orientar a implementação do processame
 A tabela `activation_requests` já contém os metadados internos na migração V2,
 mapeados por `model.ActivationRequest`. Esta decisão define sua semântica e o
 protocolo que o worker deverá cumprir. As operações implementadas de claim,
-preparação e recuperação e as etapas pendentes estão descritas ao final desta decisão. A persistência
-existente ainda não garante o protocolo completo de envio.
+preparação, resultado e recuperação e as etapas pendentes estão descritas ao final
+desta decisão. A persistência existente ainda não garante o protocolo completo de envio.
 
 Os estados públicos continuam `PENDING`, `PROCESSING`, `COMPLETED` e `FAILED`.
 Espera por retry e resultado indeterminado permanecem em `PROCESSING`. Os campos
@@ -67,12 +67,16 @@ chamada remota após uma falha do processo.
 | Falha confirmada esgotando o limite de tentativas | `FAILED` | `NULL` | `false` | Código categorizado da última falha. |
 | Timeout ou outra resposta sem certeza sobre o efeito externo | `PROCESSING` | `NULL` | `true` | Código categorizado, como `PROVIDER_TIMEOUT`. |
 
-O limite é de **3 tentativas totais**, incluindo a primeira. A política do futuro
-processador calcula backoff exponencial com jitter e respeita `Retry-After`
+O limite é de **3 tentativas totais**, incluindo a primeira. A política de retry
+calcula backoff exponencial com jitter e respeita `Retry-After`
 válido; persiste o instante escolhido, sem espera com `Thread.sleep`. Nem um
 HTTP 500/503 nem o esgotamento do contador confirmam ausência de ativação.
 Resultado indeterminado permanece em `PROCESSING`, mesmo na terceira tentativa.
-Classificação HTTP e parâmetros do backoff serão definidos na integração.
+O backoff inicia em 1 s, dobra por tentativa e limita a base a 1 min, com jitter
+adicional de até 25%, configuráveis em `app.worker.retry`. O jitter não reduz a
+base; o atraso deve ter pelo menos 1 ms. `Retry-After` é recebido como `Instant`
+opcional e funciona como limite mínimo, sem reduzir o backoff. Sua interpretação
+e a classificação de respostas HTTP serão definidas na integração.
 
 ## Elegibilidade, posse e recuperação
 
@@ -193,8 +197,30 @@ da escrita sem efeito, continuidade de outras pendências, commit independente
 e rejeição de versão/worker incorretos, lease ausente/vencido (inclusive no limite),
 estados incompatíveis e resposta tardia após recuperação. Usa PostgreSQL real.
 
-HTTP, renovação, persistência de resultados confirmados, scheduler e reconciliação
-continuam pendentes. As demais relações entre colunas não possuem enforcement completo
+`ActivationRequestOutcomeService` grava sucesso, falha permanente e falha
+transitória comprovadamente segura em transações `REQUIRES_NEW`. A atualização
+condicional exige a posse válida, versão e contador da tentativa preparada,
+`PROCESSING` e sinalização preventiva ativa. Libera a posse e limpa a sinalização
+na mesma escrita que persiste estado, próximo agendamento e erro, com incremento
+de versão/auditoria. Não incrementa novamente o contador. Sucesso limpa o erro;
+falhas preservam somente o código categorizado. Zero linhas retorna `false`;
+contagem inesperada lança exceção e reverte a transação.
+
+`ActivationRetryPolicy` calcula o atraso exponencial e o jitter; o SQL persiste
+o maior instante entre relógio do banco mais atraso e `Retry-After`. Atrasos
+menores que 1 ms são rejeitados no SQL quando há retry. A terceira falha segura
+gera `FAILED` sem agendamento; resultado ambíguo continua bloqueado conforme
+o protocolo anterior. Repetição de resultado, worker antigo e lease expirado
+não alteram os dados nem antecipam o prazo. Não existe loop local de retries.
+
+`ActivationRequestOutcomeTests` verifica o ciclo até três tentativas,
+agendamento/`Retry-After`, resultados terminais, concorrência, perda de posse,
+vencimento exato do lease, liberação e commit independente em PostgreSQL real.
+Os testes unitários cobrem a política de atraso, sua configuração, validação dos
+códigos de erro e contagens de linhas inesperadas.
+
+HTTP, renovação, scheduler e reconciliação continuam pendentes.
+As demais relações entre colunas não possuem enforcement completo
 no banco ou nos métodos da entidade. Os métodos atuais
 `startProcessing()`, `complete()` e `fail()` cuidam das transições básicas;
 não implementam o protocolo de posse e envio desta decisão.
@@ -203,6 +229,6 @@ Os testes existentes `FlywayMigrationTests`, `ActivationRequestPersistenceTests`
 `ActivationRequestTests` e `ActivationRequestMapperTests` verificam schema,
 mapeamento, defaults, auditoria, lock otimista e isolamento dos campos públicos.
 Esses testes não comprovam o fluxo completo do worker. As próximas etapas
-deverão testar rejeição de worker antigo na gravação do resultado, cálculo e
-persistência de backoff, timeout real e ausência de reenvio em resultado
+deverão testar classificação de respostas, interpretação de `Retry-After`,
+timeout real e ausência de reenvio em resultado
 indeterminado no fluxo HTTP completo, com PostgreSQL real.

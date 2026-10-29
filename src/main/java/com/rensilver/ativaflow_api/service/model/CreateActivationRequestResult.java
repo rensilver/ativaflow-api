@@ -1,4 +1,4 @@
-package com.rensilver.ativaflow_api.service;
+package com.rensilver.ativaflow_api.service.model;
 
 import com.rensilver.ativaflow_api.dto.response.ActivationRequestResponse;
 
