@@ -4,6 +4,7 @@ import java.time.Instant;
 import java.util.UUID;
 
 import com.rensilver.ativaflow_api.domain.ActivationStatus;
+import org.springframework.lang.Nullable;
 
 /** Representação pública de uma solicitação, com datas em UTC. */
 public record ActivationRequestResponse(
@@ -12,7 +13,7 @@ public record ActivationRequestResponse(
 		String customerId,
 		String productCode,
 		ActivationStatus status,
-		Instant createdAt,
-		Instant updatedAt
+		@Nullable Instant createdAt,
+		@Nullable Instant updatedAt
 ) {
 }

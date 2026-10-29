@@ -13,6 +13,7 @@ import org.springframework.boot.test.autoconfigure.web.servlet.AutoConfigureMock
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.context.annotation.Import;
 import org.springframework.http.MediaType;
+import org.springframework.lang.NonNull;
 import org.springframework.test.context.ActiveProfiles;
 import org.springframework.test.web.servlet.MockMvc;
 
@@ -38,7 +39,7 @@ class AtivaflowApiApplicationTests {
 			"/swagger-ui/swagger-ui-bundle.js",
 			"/swagger-ui/swagger-initializer.js"
 	})
-	void documentationIsAccessibleWithoutAuthentication(String path) throws Exception {
+	void documentationIsAccessibleWithoutAuthentication(@NonNull String path) throws Exception {
 		mockMvc.perform(get(path))
 				.andExpect(status().isOk());
 	}
@@ -61,7 +62,7 @@ class AtivaflowApiApplicationTests {
 
 	@ParameterizedTest
 	@ValueSource(strings = {"/api/activation-requests", "/v3/api-docs-private", "/swagger-ui-private"})
-	void routesOutsideDocumentationStillRequireAuthentication(String path) throws Exception {
+	void routesOutsideDocumentationStillRequireAuthentication(@NonNull String path) throws Exception {
 		mockMvc.perform(get(path).accept(MediaType.APPLICATION_JSON))
 				.andExpect(status().isUnauthorized());
 	}

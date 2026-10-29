@@ -6,6 +6,8 @@ import org.mapstruct.BeanMapping;
 import org.mapstruct.Mapper;
 import org.mapstruct.MappingConstants;
 import org.mapstruct.ReportingPolicy;
+import org.springframework.lang.Contract;
+import org.springframework.lang.Nullable;
 
 /**
  * Converte entidades em respostas públicas sem metadados internos de processamento.
@@ -16,10 +18,15 @@ import org.mapstruct.ReportingPolicy;
 		unmappedSourcePolicy = ReportingPolicy.ERROR)
 public interface ActivationRequestMapper {
 
-	// Cada propriedade de origem omitida deve ser explicitamente revisada como metadado interno.
+	/**
+	 * Retorna null apenas quando a entidade de entrada é nula.
+	 * Cada propriedade de origem omitida deve ser revisada como metadado interno.
+	 */
 	@BeanMapping(ignoreUnmappedSourceProperties = {
 			"consumerId", "version", "attemptCount", "nextAttemptAt",
 			"leaseUntil", "claimedBy", "lastErrorCode", "reconciliationRequired"
 	})
-	ActivationRequestResponse toResponse(ActivationRequest entity);
+	@Nullable
+	@Contract("null -> null; !null -> !null")
+	ActivationRequestResponse toResponse(@Nullable ActivationRequest entity);
 }

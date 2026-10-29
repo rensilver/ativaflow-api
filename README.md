@@ -3,9 +3,10 @@
 Projeto Java 21 com Spring Boot 3.5.16, organizado em camadas para uma API REST.
 A base atual reúne dependências, configurações por ambiente, estrutura de pacotes,
 migrações, entidade JPA com transições de estado, auditoria e controle otimista,
-e DTOs públicos como records com Bean Validation na entrada.
+e DTOs públicos como records com Bean Validation na entrada, além da criação
+de solicitações por `POST /api/v1/requests`.
 Os pacotes de aplicação possuem suas responsabilidades descritas em
-`package-info.java`; endpoints e integração com o provedor ainda estão pendentes.
+`package-info.java`; consultas e integração com o provedor ainda estão pendentes.
 
 ## Tecnologias e dependências
 
@@ -245,10 +246,41 @@ compartilhada (`fail-on-unknown-properties: true`). Na criação, somente
 do JSON, antes de criar a entidade. Ao usar `@RequestBody`, essa falha é tratada
 pelo Spring MVC como HTTP 400.
 
-Os DTOs definem os contratos; os endpoints ainda estão pendentes. A validação
-das entradas deverá ser acionada com `@Valid` no parâmetro `@RequestBody` dos
-controllers quando forem implementados. As anotações não validam automaticamente
-uma chamada direta ao construtor do record.
+O controller de criação aciona a validação com `@Valid` no parâmetro
+`@RequestBody`. As anotações não validam automaticamente uma chamada direta ao
+construtor do record.
+
+## Criação de solicitações
+
+`POST /api/v1/requests` recebe os três identificadores descritos acima. O serviço
+cria a entidade pela factory de domínio e persiste uma linha em uma transação.
+O proprietário (`consumerId`) vem de `Principal.getName()`, conforme a identidade
+autenticada pelo Spring Security. O corpo não pode definir esse valor.
+
+Após o commit, a API responde `201 Created`, com
+`Location: /api/v1/requests/{id}` e os sete campos de `ActivationRequestResponse`.
+O UUID é gerado pelo servidor; `createdAt` e `updatedAt` são preenchidos pela
+auditoria JPA e expostos em UTC. A resposta é a fotografia imutável da criação
+em `PENDING`. A criação não chama o provedor nem inicia processamento externo.
+Dados inválidos, propriedades desconhecidas ou campos controlados pelo servidor
+no JSON resultam em `400 Bad Request`, sem inserção.
+
+A segurança atual exige autenticação e CSRF. Exemplo com credenciais válidas,
+cookie de sessão e token CSRF obtidos na mesma sessão (por exemplo, no formulário
+`/login`):
+
+```bash
+curl -i -X POST http://localhost:8080/api/v1/requests \
+  --user "$API_USER:$API_PASSWORD" \
+  --cookie "JSESSIONID=$SESSION_ID" \
+  --header "X-CSRF-TOKEN: $CSRF_TOKEN" \
+  --header 'Content-Type: application/json' \
+  --data '{"externalId":"EXT-12345","customerId":"CUST-10001","productCode":"INTERNET-500"}'
+```
+
+JWT, escopos e a política HTTP para repetições de `externalId` ainda estão
+pendentes; a constraint de unicidade global continua garantida pelo PostgreSQL.
+As rotas de consulta ainda não estão implementadas.
 
 ## Perfis e variáveis de ambiente
 
@@ -325,9 +357,8 @@ continuam habilitados; a autenticação JWT ainda será implementada.
 A documentação fica disponível em todos os perfis. Para desativá-la, configure
 `SPRINGDOC_API_DOCS_ENABLED=false` e `SPRINGDOC_SWAGGER_UI_ENABLED=false`.
 
-Os controllers REST serão documentados automaticamente quando implementados.
-Como ainda não há endpoints de negócio, a interface inicialmente não lista
-operações de ativação. As entidades JPA não são expostas pela documentação.
+O controller de criação é documentado automaticamente, com os DTOs de entrada
+e saída. As entidades JPA não são expostas pela documentação.
 
 ## Testes e integração contínua
 
@@ -367,6 +398,11 @@ preenchidos, além de entrada nula e datas anteriores à persistência, sem Dock
 contra as migrações no PostgreSQL, leitura dos quatro estados como texto,
 auditoria com relógio controlado e sessão SQL fora de UTC, preservação da data
 de criação e rejeição de gravação obsoleta entre dois contextos de persistência.
+`CreateActivationRequestEndpointTests` percorre HTTP, serviço, mapper e PostgreSQL
+real, sem transação de teste, para verificar commit, `PENDING`, proprietário
+autenticado, auditoria, `201`, `Location` e os sete campos públicos. Também verifica
+`400` sem inserção para campos inválidos/controlados pelo servidor, além de
+preservação da autenticação e da proteção CSRF.
 
 Também é possível executar a aplicação com o PostgreSQL do Testcontainers e o
 perfil `test` por meio de `TestAtivaflowApiApplication`:

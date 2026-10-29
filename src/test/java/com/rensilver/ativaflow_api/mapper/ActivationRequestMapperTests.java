@@ -69,6 +69,9 @@ class ActivationRequestMapperTests {
 		ActivationRequest entity = ActivationRequest.create("EXT-1", "CUSTOMER-1", "PRODUCT-1", "consumer-private");
 
 		var response = mapper.toResponse(entity);
+		if (response == null) {
+			throw new AssertionError("A non-null entity must produce a response");
+		}
 
 		assertThat(response.id()).isEqualTo(entity.getId());
 		assertThat(response.status()).isEqualTo(ActivationStatus.PENDING);
