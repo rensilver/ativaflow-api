@@ -24,6 +24,7 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.RegisterExtension;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.Arguments;
+import org.junit.jupiter.params.provider.CsvSource;
 import org.junit.jupiter.params.provider.EnumSource;
 import org.junit.jupiter.params.provider.MethodSource;
 import org.junit.jupiter.params.provider.ValueSource;
@@ -80,6 +81,7 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
 class CreateActivationRequestEndpointTests {
 
 	private static final String CONSUMER = "consumer-post-tests";
+	private static final String OTHER_CONSUMER = "consumer-post-tests-other";
 	private static final String PATH = "/api/v1/requests";
 	private static final Instant CREATED_AT = Instant.parse("2026-10-28T15:00:00.123456Z");
 	private static final Instant PROCESSED_AT = Instant.parse("2026-10-28T15:01:00.123456Z");
@@ -111,7 +113,7 @@ class CreateActivationRequestEndpointTests {
 
 	@AfterEach
 	void removeCreatedRequests() {
-		jdbcTemplate.update("DELETE FROM activation_requests WHERE consumer_id = ?", CONSUMER);
+		jdbcTemplate.update("DELETE FROM activation_requests WHERE consumer_id IN (?, ?)", CONSUMER, OTHER_CONSUMER);
 	}
 
 	@Test
@@ -281,8 +283,13 @@ class CreateActivationRequestEndpointTests {
 		mockMvc.perform(post(PATH).with(user(CONSUMER)).with(csrf())
 				.contentType(MediaType.APPLICATION_JSON).content(PAYLOAD))
 				.andExpect(status().isCreated());
-		jdbcTemplate.update("UPDATE activation_requests SET status = ? WHERE consumer_id = ?",
-				activationStatus.name(), CONSUMER);
+		jdbcTemplate.update("""
+				UPDATE activation_requests SET status = ?, updated_at = ?, version = 4,
+				attempt_count = 2, next_attempt_at = ?, lease_until = ?, claimed_by = 'worker-private',
+				last_error_code = 'PROVIDER_TIMEOUT', reconciliation_required = true WHERE consumer_id = ?
+				""", activationStatus.name(), OffsetDateTime.ofInstant(PROCESSED_AT, ZoneOffset.UTC),
+				OffsetDateTime.ofInstant(PROCESSED_AT.plusSeconds(30), ZoneOffset.UTC),
+				OffsetDateTime.ofInstant(PROCESSED_AT.plusSeconds(60), ZoneOffset.UTC), CONSUMER);
 		var storedBefore = jdbcTemplate.queryForMap(
 				"SELECT * FROM activation_requests WHERE consumer_id = ?", CONSUMER);
 		var payload = (ObjectNode) objectMapper.readTree(PAYLOAD);
@@ -311,10 +318,66 @@ class CreateActivationRequestEndpointTests {
 				Arguments.of(status, CONSUMER, "CUST-10001", "INTERNET-500 "),
 				Arguments.of(status, CONSUMER, "CUST-10001", "internet-500"),
 				Arguments.of(status, CONSUMER, "CUST-OTHER", "INTERNET-OTHER"),
-				Arguments.of(status, "other-consumer", "CUST-10001", "INTERNET-500"),
-				Arguments.of(status, "other-consumer", "CUST-OTHER", "INTERNET-500"),
-				Arguments.of(status, "other-consumer", "CUST-10001", "INTERNET-OTHER"),
-				Arguments.of(status, "other-consumer", "CUST-OTHER", "INTERNET-OTHER")));
+				Arguments.of(status, OTHER_CONSUMER, "CUST-10001", "INTERNET-500"),
+				Arguments.of(status, OTHER_CONSUMER, "CUST-OTHER", "INTERNET-500"),
+				Arguments.of(status, OTHER_CONSUMER, "CUST-10001", "INTERNET-OTHER"),
+				Arguments.of(status, OTHER_CONSUMER, "CUST-OTHER", "INTERNET-OTHER")));
+	}
+
+	@ParameterizedTest
+	@CsvSource({"CUST-10001, INTERNET-500", "CUST-OTHER, INTERNET-500",
+			"CUST-10001, INTERNET-OTHER", "CUST-OTHER, INTERNET-OTHER"})
+	void consumerCollisionPreservesOwnershipAndDoesNotExposeRecordThroughLookupOrListing(
+			String customerId, String productCode) throws Exception {
+		var created = mockMvc.perform(post(PATH).with(user(CONSUMER)).with(csrf())
+				.contentType(MediaType.APPLICATION_JSON).content(PAYLOAD))
+				.andExpect(status().isCreated()).andReturn().getResponse();
+		String originalResponse = created.getContentAsString();
+		String location = created.getHeader("Location");
+		var storedBefore = jdbcTemplate.queryForMap(
+				"SELECT * FROM activation_requests WHERE consumer_id = ?", CONSUMER);
+		var payload = (ObjectNode) objectMapper.readTree(PAYLOAD);
+		payload.put("customerId", customerId);
+		payload.put("productCode", productCode);
+
+		var collision = mockMvc.perform(post(PATH).with(user(OTHER_CONSUMER)).with(csrf())
+				.contentType(MediaType.APPLICATION_JSON).content(objectMapper.writeValueAsString(payload)))
+				.andReturn();
+		assertConflictProblem(collision);
+		mockMvc.perform(get(location).with(user(OTHER_CONSUMER)))
+				.andExpect(status().isNotFound())
+				.andExpect(content().contentTypeCompatibleWith(MediaType.APPLICATION_PROBLEM_JSON))
+				.andExpect(content().json("""
+						{"type":"about:blank","title":"Not Found","status":404,
+						 "detail":"Activation request not found","instance":"%s"}
+						""".formatted(location), JsonCompareMode.STRICT));
+		mockMvc.perform(get(PATH).with(user(OTHER_CONSUMER)))
+				.andExpect(status().isOk())
+				.andExpect(content().json("""
+						{"content":[],"page":0,"size":20,"totalElements":0,"totalPages":0}
+						""", JsonCompareMode.STRICT));
+
+		// O rollback da colisão não deve impedir uma criação legítima do outro consumidor.
+		payload.put("externalId", "EXT-OTHER-CONSUMER");
+		var otherCreated = mockMvc.perform(post(PATH).with(user(OTHER_CONSUMER)).with(csrf())
+				.contentType(MediaType.APPLICATION_JSON).content(objectMapper.writeValueAsString(payload)))
+				.andExpect(status().isCreated()).andReturn().getResponse().getContentAsString();
+		mockMvc.perform(get(PATH).with(user(OTHER_CONSUMER)))
+				.andExpect(status().isOk())
+				.andExpect(content().json("""
+						{"content":[%s],"page":0,"size":20,"totalElements":1,"totalPages":1}
+						""".formatted(otherCreated), JsonCompareMode.STRICT));
+		mockMvc.perform(post(PATH).with(user(CONSUMER)).with(csrf())
+				.contentType(MediaType.APPLICATION_JSON).content(PAYLOAD))
+				.andExpect(status().isOk())
+				.andExpect(header().doesNotExist("Location"))
+				.andExpect(content().json(originalResponse, JsonCompareMode.STRICT));
+		assertThat(jdbcTemplate.queryForMap(
+				"SELECT * FROM activation_requests WHERE consumer_id = ?", CONSUMER)).isEqualTo(storedBefore);
+		assertThat(jdbcTemplate.queryForObject(
+				"SELECT COUNT(*) FROM activation_requests WHERE external_id = ?", Long.class, " EXT-12345 "))
+				.isEqualTo(1);
+		provider.verify(0, anyRequestedFor(anyUrl()));
 	}
 
 	@Test
@@ -346,18 +409,18 @@ class CreateActivationRequestEndpointTests {
 	}
 
 	@ParameterizedTest
-	@ValueSource(strings = {"identical", "customerId", "productCode", "consumerId", "consumerIdAndContent"})
+	@ValueSource(strings = {"identical", "customerId", "productCode", "content", "consumerId", "consumerIdAndContent"})
 	void requestsLosingUniqueConstraintRaceApplyRepetitionRulesAfterRollback(String changedField) throws Exception {
 		UUID id = UUID.randomUUID();
 		var payload = (ObjectNode) objectMapper.readTree(PAYLOAD);
 		if (changedField.equals("customerId") || changedField.equals("productCode")) {
 			payload.put(changedField, "DIFFERENT");
 		}
-		if (changedField.equals("consumerIdAndContent")) {
+		if (changedField.equals("content") || changedField.equals("consumerIdAndContent")) {
 			payload.put("customerId", "CUST-OTHER");
 			payload.put("productCode", "INTERNET-OTHER");
 		}
-		String consumer = changedField.startsWith("consumerId") ? "other-consumer" : CONSUMER;
+		String consumer = changedField.startsWith("consumerId") ? OTHER_CONSUMER : CONSUMER;
 		String requestBody = objectMapper.writeValueAsString(payload);
 		try (var executor = Executors.newFixedThreadPool(3)) {
 			List<Future<MvcResult>> futures = new ArrayList<>();

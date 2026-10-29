@@ -856,8 +856,13 @@ inserção sem commit e observa três inserções bloqueadas no PostgreSQL antes
 de liberá-la, comprovando a recuperação após a disputa real da constraint,
 sem mocks de repositório.
 O contrato de conflito exige os cinco campos de Problem Details, sem campos
-extras ou `Location`, nos quatro status. A disputa real da constraint também
-cobre cliente, produto e consumidor divergentes: as chamadas perdedoras recebem
+extras ou `Location`, nos quatro status, mesmo com os metadados internos de
+processamento preenchidos, preservando todos os campos persistidos. Após uma
+colisão entre consumidores, os testes exigem `404` na consulta individual e
+listagem sem o registro alheio ou seus totais; o consumidor recusado ainda pode
+criar outra solicitação e o proprietário pode repetir a original com `200`.
+A disputa real da constraint também cobre cliente, produto, ambos os campos e
+consumidor divergentes: as chamadas perdedoras recebem
 `409`, preservando todos os campos da linha vencedora e sem chamar o provedor.
 Os contratos HTTP também cobrem campos obrigatórios ausentes, corpo vazio ou
 JSON inválido, rejeição de propriedades desconhecidas e de todos os metadados
