@@ -1077,6 +1077,19 @@ dinâmica: URL com prefixo, payload exato com Unicode e espaços, classificaçã
 respostas, `Retry-After`, timeout de leitura, falha de conexão e ausência de retry
 ou redirecionamento automático. Também verifica rejeição de configuração inválida
 na inicialização, sem exigir banco ou Compose.
+`HttpActivationProviderWireMockTests` testa isoladamente a fronteira HTTP do
+cliente, com WireMock em porta dinâmica e sem contexto Spring, banco, Docker ou
+Compose. Cobre sucesso (`200/201/204`), rejeição (`400`), resultados indeterminados
+(`500/429/503`, inclusive com `Retry-After`), conexão interrompida, resposta vazia
+e timeout. Confere o payload exato e uma única chamada por tentativa, além do
+sucesso de outra solicitação usando o mesmo cliente após uma falha. São testes
+de integração HTTP restritos ao cliente; o servidor simulado roda na própria JVM.
+Para executar somente essa classe:
+
+```bash
+bash ./mvnw -B --no-transfer-progress -Dtest=HttpActivationProviderWireMockTests test
+```
+
 `CorrelationIdFilterTests`, `HttpActivationProviderCorrelationTests` e
 `ActivationRequestCorrelationPropagationTests` verificam geração/validação do
 header, passagem do POST até tentativas posteriores do worker, preservação na
