@@ -4,10 +4,14 @@ import java.util.UUID;
 
 import com.rensilver.ativaflow_api.client.provider.ActivationProviderClient;
 import com.rensilver.ativaflow_api.client.provider.dto.ActivationProviderRequest;
+import com.rensilver.ativaflow_api.domain.ProviderOutcome;
+import com.rensilver.ativaflow_api.observability.CorrelationId;
 import com.rensilver.ativaflow_api.repository.ActivationRequestRepository;
 import com.rensilver.ativaflow_api.service.ActivationRequestAttemptService;
 import com.rensilver.ativaflow_api.service.ActivationRequestClaimService;
 import com.rensilver.ativaflow_api.service.ActivationRequestOutcomeHandler;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Component;
@@ -18,6 +22,8 @@ import org.springframework.transaction.annotation.Transactional;
 @Component
 @ConditionalOnProperty(name = "app.worker.enabled", havingValue = "true", matchIfMissing = true)
 public class ActivationRequestWorker {
+
+	private static final Logger log = LoggerFactory.getLogger(ActivationRequestWorker.class);
 
 	private final ActivationRequestClaimService claims;
 	private final ActivationRequestAttemptService attempts;
@@ -58,11 +64,39 @@ public class ActivationRequestWorker {
 			return true;
 		}
 
-		var request = repository.findById(attempt.orElseThrow().id()).orElseThrow(
+		var prepared = attempt.orElseThrow();
+		var request = repository.findById(prepared.id()).orElseThrow(
 				() -> new IllegalStateException("Prepared activation request no longer exists"));
-		var outcome = provider.activate(new ActivationProviderRequest(
-				request.getExternalId(), request.getCustomerId(), request.getProductCode()));
-		outcomes.record(attempt.orElseThrow(), outcome);
+		// O worker pode executar em outra thread/instância: a fonte é o registro persistido, nunca o MDC herdado.
+		String correlationId = CorrelationId.isValid(request.getCorrelationId())
+				? request.getCorrelationId() : request.getId().toString();
+		try (var ignored = CorrelationId.withId(correlationId)) {
+			log.atInfo().addKeyValue("event", "activation_attempt_started")
+					.addKeyValue("correlationId", correlationId)
+					.addKeyValue("requestId", prepared.id()).addKeyValue("attempt", prepared.attemptCount())
+					.log("Activation attempt started");
+			String result = "UNEXPECTED_ERROR";
+			String persistence = "NOT_RECORDED";
+			try {
+				var outcome = provider.activate(new ActivationProviderRequest(
+						request.getExternalId(), request.getCustomerId(), request.getProductCode()));
+				result = switch (outcome) {
+					case ProviderOutcome.Success success -> "SUCCESS";
+					case ProviderOutcome.PermanentFailure failure -> "PERMANENT_FAILURE";
+					case ProviderOutcome.TransientFailure failure -> "TRANSIENT_FAILURE";
+					case ProviderOutcome.Indeterminate indeterminate -> "INDETERMINATE";
+				};
+				persistence = "ERROR";
+				persistence = outcomes.record(prepared, outcome) ? "RECORDED" : "STALE";
+			}
+			finally {
+				log.atInfo().addKeyValue("event", "activation_attempt_finished")
+						.addKeyValue("correlationId", correlationId)
+						.addKeyValue("requestId", prepared.id()).addKeyValue("attempt", prepared.attemptCount())
+						.addKeyValue("result", result).addKeyValue("persistence", persistence)
+						.log("Activation attempt finished");
+			}
+		}
 		return true;
 	}
 }

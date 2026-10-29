@@ -127,6 +127,11 @@ adiciona os campos internos abaixo, preservando a V1 e o contrato público:
 | `last_error_code` | `VARCHAR(100)`, opcional; código categorizado da última falha, sem payload, credenciais ou resposta bruta do provedor. |
 | `reconciliation_required` | `BOOLEAN`, obrigatório, padrão `false`; indica resultado externo indeterminado que exige reconciliação. |
 
+A migração `V4__add_activation_request_correlation_id.sql` acrescenta
+`correlation_id VARCHAR(128)`, opcional e imutável na entidade. Ela preserva a
+correlação da criação até o worker, sem alterar os campos JSON públicos. Registros
+anteriores continuam válidos com esse campo nulo.
+
 O contrato de uso desses campos está definido na
 [ADR-0001 — Metadados de processamento](docs/adr/0001-metadados-de-processamento.md),
 incluindo contagem antes do envio, próximo agendamento, validade do lease,
@@ -411,8 +416,61 @@ com credenciais, query ou fragmento. Um prefixo de caminho na URL base é preser
 O builder configurado pelo Spring Boot é utilizado com transporte JDK e HTTP/1.1
 explícitos, sem redirecionamentos automáticos. O cliente executa uma única
 tentativa e não persiste nem altera estados. O mapping WireMock de sucesso está
-disponível no Compose para demonstração local. Metadados de correlação e worker
-continuam pendentes.
+disponível no Compose para demonstração local. O worker recupera a correlação
+persistida antes da chamada ao provedor.
+
+`CorrelationIdFilter` executa antes dos filtros de segurança e devolve
+`X-Correlation-ID` no header da resposta. Aceita um único header de entrada com
+1 a 128 caracteres ASCII: primeiro caractere alfanumérico e demais caracteres
+alfanuméricos, `.`, `_`, `:` ou `-`. Header ausente, inválido ou repetido é
+substituído por um UUID gerado pelo servidor, sem registrar o valor rejeitado.
+A criação persiste esse identificador; um POST duplicado preserva a correlação da
+solicitação original. Não é chave de idempotência nem campo do payload de negócio.
+
+O worker usa o identificador persistido em cada tentativa, inclusive após reinício
+ou em outra instância. Para registros antigos sem correlação válida, usa o UUID
+da solicitação. O contexto `correlationId` no MDC fica limitado à execução e é
+restaurado ao final, inclusive em exceções. O cliente HTTP envia apenas a correlação
+válida do contexto atual em `X-Correlation-ID`; não copia `Authorization`, cookies
+ou o JWT do consumidor. A autenticação própria de um provedor real depende de
+contrato futuro.
+
+Os eventos de tentativa são emitidos em nível `INFO` com campos estruturados
+SLF4J, visíveis no formato padrão do Logback:
+
+| Evento (`event`) | Campos técnicos |
+| --- | --- |
+| `activation_attempt_started` | `correlationId`, `requestId` interno e `attempt` com o contador já persistido, antes de chamar o provedor. |
+| `activation_provider_attempt` | `correlationId`, `httpStatus`, `responseCategory`, `durationMs` e `result`, uma vez por chamada ao cliente HTTP. |
+| `activation_attempt_finished` | `correlationId`, `requestId`, `attempt`, `result` e `persistence`, após a tentativa de gravar o resultado. |
+
+`responseCategory` distingue `HTTP_2XX`, `HTTP_3XX`, `HTTP_4XX`, `HTTP_5XX`,
+`TIMEOUT`, `COMMUNICATION_FAILURE` e `UNEXPECTED_ERROR`. `httpStatus=0` indica
+que a chamada não retornou uma resposta HTTP utilizável. `durationMs` usa o
+relógio monotônico (`System.nanoTime`) e mede a chamada ao cliente, incluindo
+preparação/serialização e liberação da resposta; não inclui as transações do worker.
+Sem contexto válido, `correlationId` no evento HTTP é nulo.
+
+`result` representa `SUCCESS`, `PERMANENT_FAILURE`, `TRANSIENT_FAILURE` ou
+`INDETERMINATE`; exceções inesperadas usam `UNEXPECTED_ERROR` e continuam sendo
+propagadas. A categoria HTTP não determina sozinha o sucesso: por exemplo, HTTP
+202 permanece `INDETERMINATE`, conforme o contrato atual.
+`persistence` diferencia `RECORDED`, `STALE` (posse/versão já não permitem a
+escrita), `NOT_RECORDED` (falha antes da gravação) e `ERROR` (gravação lançou exceção).
+Um resultado HTTP `SUCCESS` só tem gravação confirmada quando o worker registra
+`persistence=RECORDED`.
+
+Os eventos usam uma lista explícita de campos técnicos: não incluem payloads,
+identificadores de negócio/cliente, headers, URLs, credenciais, códigos de erro
+livres, mensagens ou stack traces de exceções. Os eventos do worker e do cliente
+podem ser relacionados por `correlationId`. Os testes unitários
+`HttpActivationProviderLoggingTests` e `ActivationRequestWorkerLoggingTests`
+cobrem classificação, duração, identificação da tentativa, falhas de persistência
+e ausência de dados sensíveis. Para executar somente esses testes:
+
+```bash
+./mvnw -Dtest=HttpActivationProviderLoggingTests,ActivationRequestWorkerLoggingTests test
+```
 
 A chamada envia `Content-Type: application/json` e apenas os três valores
 persistidos, sem normalização:
@@ -428,30 +486,71 @@ persistidos, sem normalização:
 O sucesso padrão é **`204 No Content`, sem corpo**, confirmando ativação concluída.
 Nenhum campo de resposta é obrigatório; não há schema de erro presumido.
 
-| Cenário | Tratamento definido para a futura integração |
-| --- | --- |
-| `204` (padrão), `200` ou `201` | Confirmam conclusão no contrato simulado: `COMPLETED`, sem retry; corpo dispensável. |
-| `202 Accepted` | Não confirma conclusão; `PROCESSING` com reconciliação, sem reenvio automático. |
-| `400` | No mock, rejeição permanente sem ativação: `FAILED`, sem retry. |
-| `500` | Efeito potencialmente aplicado: `PROCESSING` com reconciliação, sem reenvio automático. |
-| `429` ou `503` | **Somente no contrato do mock**, garantem não ativação: até três tentativas totais, com backoff, jitter e `Retry-After` válido; terceira falha segura encerra em `FAILED`. |
-| Timeout, resposta não contratada ou erro sem garantia de não ativação | `PROCESSING` com reconciliação, sem retry automático. |
+### Matriz HTTP → status → retry → justificativa
 
-A garantia do mock não se transfere a um provedor real ao mudar a URL base.
-`externalId` não garante idempotência externa. O mock não exige autenticação;
-o mecanismo real precisa ser contratado, e o JWT do consumidor não é encaminhado.
-A ADR detalha campos, headers, `Retry-After`, limites e critérios futuros de teste.
+A matriz descreve o comportamento implementado de `HttpActivationProviderClient`
+e o status local após o worker persistir o resultado. HTTP refere-se à resposta de
+`POST /provider/v1/activate`; falhas externas são tratadas no fluxo assíncrono e
+não são repassadas como o código HTTP da API de criação.
+
+| HTTP ou falha no provedor | Status local | Retry automático | Justificativa |
+| --- | --- | --- | --- |
+| `200 OK`, `201 Created`, `204 No Content` (padrão) | `COMPLETED` | Não. | O contrato assumido confirma ativação concluída (`Success`); o corpo é dispensável. |
+| `202 Accepted` | `PROCESSING`, com reconciliação | Não. | Aceitação não confirma conclusão; resultado `Indeterminate`. |
+| Demais `2xx` | `PROCESSING`, com reconciliação | Não. | Não estão contratados como confirmação de conclusão; resultado `Indeterminate`. |
+| `400 Bad Request` | `FAILED` | Não, em qualquer tentativa. | Supõe-se rejeição definitiva antes da ativação (`PermanentFailure`); `Retry-After` não altera essa decisão. |
+| `429 Too Many Requests` | `PROCESSING`, com reconciliação | Não, mesmo com `Retry-After`. | Limitação de tráfego não comprova ausência de ativação; resultado `Indeterminate`. |
+| `500 Internal Server Error` | `PROCESSING`, com reconciliação | Não, mesmo com `Retry-After`. | A falha pode ocorrer depois da ativação; resultado `Indeterminate`. |
+| `503 Service Unavailable` | `PROCESSING`, com reconciliação | Não, mesmo com `Retry-After`. | Indisponibilidade não comprova ausência de ativação; resultado `Indeterminate`. |
+| Demais respostas, incluindo `3xx`, outros `4xx` e outros `5xx` | `PROCESSING`, com reconciliação | Não. | Sem garantia contratual sobre o efeito externo; resultado `Indeterminate`. Redirecionamentos não são seguidos automaticamente. |
+| Timeout de conexão ou leitura | `PROCESSING`, com reconciliação | Não. | O timeout não comprova cancelamento nem ausência de ativação; resultado `Indeterminate`. |
+| Falha de comunicação sem resposta HTTP confiável | `PROCESSING`, com reconciliação | Não. | O efeito externo permanece desconhecido; resultado `Indeterminate`. |
+
+Reconciliação significa `reconciliation_required=true` e `next_attempt_at=null`:
+o worker não pode adquirir a solicitação para reenvio. Os estados da matriz
+pressupõem gravação com posse, versão e lease válidos. Se a gravação falhar ou
+retornar `false`, o resultado não está confirmado no banco; a proteção preventiva
+da preparação permanece, sem autorizar novo envio.
+
+### Suposições e limitações da matriz
+
+- Não existe contrato oficial adicional do provedor. Sucesso em `200/201/204` e
+  rejeição sem ativação em `400` são suposições do projeto e do mock, registradas
+  na ADR-0002; precisam ser validadas para um provedor real. Alterar a URL base
+  não comprova essas garantias nem habilita retry para `429/503`.
+- Não há schema de resposta contratado. Corpos de sucesso e erro são ignorados;
+  o cliente não usa mensagens do provedor para decidir status ou retry.
+- `externalId` não garante idempotência externa; a integração não envia
+  `Idempotency-Key` nem garante uma única ativação diante de reenvios. O mock
+  dispensa autenticação; o mecanismo real precisa ser contratado, e o JWT do
+  consumidor não é encaminhado.
+- Cada chamada ao cliente representa uma tentativa, sem retry próprio. Nenhuma
+  resposta HTTP atual produz `TransientFailure`. A aplicação já suporta esse
+  resultado para falhas com garantia contratual explícita de não ativação, mas
+  a classificação HTTP correspondente ainda depende de implementação.
+- Resultados indeterminados permanecem em `PROCESSING`, inclusive após expiração
+  do lease ou esgotamento das tentativas. Não há consulta externa, callback ou
+  reconciliação automática implementada; é necessária intervenção operacional
+  com evidência confiável do efeito externo.
+
+Quando uma integração puder produzir `TransientFailure` com segurança, o serviço
+manterá `PROCESSING` e agendará retry enquanto `attempt_count < maxAttempts`;
+ao atingir o limite, encerrará em `FAILED`, sem agendamento e sem reconciliação.
+São de uma a três tentativas totais (padrão: três, incluindo a inicial), conforme
+`WORKER_RETRY_MAX_ATTEMPTS`. O próximo envio respeita o maior instante entre o
+backoff exponencial com jitter e o `retryAfter` já interpretado, sem antecipar o
+prazo do provedor para caber no teto do backoff. A política e seus padrões estão
+descritos em [Resultados confirmados e agendamento de retries](#resultados-confirmados-e-agendamento-de-retries).
 
 O cliente traduz essa matriz para `ProviderOutcome`, com códigos internos
-`PROVIDER_REJECTED`, `PROVIDER_TEMPORARILY_UNAVAILABLE`,
-`PROVIDER_INTERNAL_ERROR_OUTCOME_UNKNOWN`, `PROVIDER_UNCONFIRMED_RESPONSE` e
-`PROVIDER_COMMUNICATION_FAILURE`.
-Os corpos de resposta são ignorados. Em falhas transitórias contratadas,
-`Retry-After` aceita segundos inteiros não negativos e data HTTP RFC 1123;
-valores inválidos ou datas passadas produzem `Optional.empty()`. Um prazo futuro
-válido é preservado, mesmo acima do teto de backoff. Overflow na representação
-do prazo produz `Indeterminate(PROVIDER_RETRY_AFTER_OUT_OF_RANGE)`.
-O agendamento e a persistência desses resultados continuam a cargo da aplicação.
+`PROVIDER_REJECTED`, `PROVIDER_INTERNAL_ERROR_OUTCOME_UNKNOWN`,
+`PROVIDER_UNCONFIRMED_RESPONSE`, `PROVIDER_TIMEOUT` e `PROVIDER_COMMUNICATION_FAILURE`.
+Os corpos de resposta são ignorados. A interpretação de `Retry-After` em segundos
+ou data HTTP para retry seguro depende de uma futura integração com garantia
+contratual explícita de não ativação, conforme o ADR-0002. O cliente atual não
+produz `TransientFailure` a partir de `429/503`. O handler já recebe
+`Optional<Instant>` em falhas comprovadamente seguras e encaminha o prazo ao
+serviço de resultados para persistência, inclusive quando ultrapassa o teto de backoff.
 
 Para HTTP `400`, o worker encaminha `PermanentFailure` ao
 `ActivationRequestOutcomeService.recordPermanentFailure`: a solicitação termina
@@ -1019,7 +1118,50 @@ dinâmica: URL com prefixo, payload exato com Unicode e espaços, classificaçã
 respostas, `Retry-After`, timeout de leitura, falha de conexão e ausência de retry
 ou redirecionamento automático. Também verifica rejeição de configuração inválida
 na inicialização, sem exigir banco ou Compose.
-`FlywayMigrationTests` verifica a aplicação e validação das migrações V1, V2 e V3,
+`HttpActivationProviderWireMockTests` testa isoladamente a fronteira HTTP do
+cliente, com WireMock em porta dinâmica e sem contexto Spring, banco, Docker ou
+Compose. Cobre sucesso (`200/201/204`), rejeição (`400`), resultados indeterminados
+(`500/429/503`, inclusive com `Retry-After`), conexão interrompida, resposta vazia
+e timeout. Confere o payload exato e uma única chamada por tentativa, além do
+sucesso de outra solicitação usando o mesmo cliente após uma falha. São testes
+de integração HTTP restritos ao cliente; o servidor simulado roda na própria JVM.
+Para executar somente essa classe:
+
+```bash
+bash ./mvnw -B --no-transfer-progress -Dtest=HttpActivationProviderWireMockTests test
+```
+
+Os testes unitários de resiliência e retomada podem ser executados isoladamente:
+
+```bash
+bash ./mvnw -B --no-transfer-progress \
+  -Dtest=HttpActivationProviderResilienceUnitTests,ActivationRequestOutcomeResilienceUnitTests,ActivationRequestWorkerRecoveryUnitTests,ActivationRequestLeaseRecoveryUnitTests test
+```
+
+Essas quatro classes não iniciam contexto Spring, banco, servidor HTTP ou containers.
+O transporte simulado verifica uma única chamada e a classificação de `429/503`
+com `Retry-After` ausente, em segundos, data HTTP, inválido, negativo ou enorme.
+Exceções de timeout de conexão/leitura são injetadas, inclusive com causas aninhadas;
+o tempo real de expiração não é medido nesses testes unitários.
+Handler e serviços reais são exercitados com repositório simulado: resultados
+ambíguos usam exclusivamente reconciliação nas três tentativas; falhas seguras
+encaminham contador, limite total configurado de uma a três tentativas, backoff e
+prazo do provedor à persistência. O worker é recriado para verificar retomada de
+trabalho elegível sem alterar o número preparado ou o payload, continuidade após
+resultado ambíguo e ausência de reenvio imediato quando perde a posse.
+A recuperação de leases preserva os limites de lote e tentativas e rejeita lote inválido.
+Elegibilidade SQL, cálculo persistido de `next_attempt_at`, esgotamento efetivo das
+tentativas, bloqueio por reconciliação e durabilidade após restart são responsabilidades
+dos testes de integração PostgreSQL existentes; não são comprovados por esses mocks.
+
+`CorrelationIdFilterTests`, `HttpActivationProviderCorrelationTests` e
+`ActivationRequestCorrelationPropagationTests` verificam geração/validação do
+header, passagem do POST até tentativas posteriores do worker, preservação na
+duplicidade, fallback para registros antigos, restauração do MDC e ausência do
+JWT no HTTP externo. Usam MockMvc standalone e MockRestServiceServer, sem banco,
+servidor HTTP ou contexto completo da aplicação. O repositório é simulado; esses
+testes não validam a aplicação da V4 no PostgreSQL.
+`FlywayMigrationTests` verifica a aplicação e validação das migrações V1 a V4,
 persistência dos campos públicos e internos, valores padrão, obrigatoriedade
 de proprietário não vazio, rejeição de contadores negativos e rejeição de status
 desconhecido no PostgreSQL real. Para a unicidade global de `external_id`, consulta
