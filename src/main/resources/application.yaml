@@ -17,10 +17,6 @@ spring:
     open-in-view: false
     hibernate:
       ddl-auto: validate
-  http:
-    client:
-      connect-timeout: ${ACTIVATION_PROVIDER_CONNECT_TIMEOUT:2s}
-      read-timeout: ${ACTIVATION_PROVIDER_READ_TIMEOUT:5s}
   lifecycle:
     timeout-per-shutdown-phase: ${SHUTDOWN_TIMEOUT:30s}
 
@@ -32,9 +28,12 @@ app:
   worker:
     lease-duration: ${WORKER_LEASE_DURATION:30s}
     retry:
+      max-attempts: ${WORKER_RETRY_MAX_ATTEMPTS:3}
       initial-delay: ${WORKER_RETRY_INITIAL_DELAY:1s}
       max-delay: ${WORKER_RETRY_MAX_DELAY:1m}
       jitter-ratio: ${WORKER_RETRY_JITTER_RATIO:0.25}
   activation-provider:
+    connect-timeout: ${ACTIVATION_PROVIDER_CONNECT_TIMEOUT:2s}
+    read-timeout: ${ACTIVATION_PROVIDER_READ_TIMEOUT:5s}
     # Reserva de configuração; a autenticação depende do contrato do provedor.
     api-key: ${ACTIVATION_PROVIDER_API_KEY:}

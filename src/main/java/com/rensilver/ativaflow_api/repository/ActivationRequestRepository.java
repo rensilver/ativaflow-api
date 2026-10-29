@@ -28,7 +28,7 @@ public interface ActivationRequestRepository extends JpaRepository<ActivationReq
 	@Query(value = """
 			SELECT * FROM activation_requests
 			WHERE reconciliation_required = false
-			  AND attempt_count < 3
+			  AND attempt_count < :maxAttempts
 			  AND (lease_until IS NULL OR lease_until <= CURRENT_TIMESTAMP)
 			  AND (
 			      (status = 'PENDING' AND attempt_count = 0 AND next_attempt_at IS NULL)
@@ -41,7 +41,7 @@ public interface ActivationRequestRepository extends JpaRepository<ActivationReq
 			LIMIT 1
 			FOR UPDATE SKIP LOCKED
 			""", nativeQuery = true)
-	Optional<ActivationRequest> findNextClaimCandidate();
+	Optional<ActivationRequest> findNextClaimCandidate(@Param("maxAttempts") int maxAttempts);
 
 	/** SQL direto controla versão/auditoria e descarta a entidade anterior ao update. */
 	@Transactional(propagation = Propagation.MANDATORY)
@@ -53,7 +53,7 @@ public interface ActivationRequestRepository extends JpaRepository<ActivationReq
 			    version = version + 1, updated_at = CURRENT_TIMESTAMP
 			WHERE id = :id AND version = :expectedVersion
 			  AND reconciliation_required = false
-			  AND attempt_count < 3
+			  AND attempt_count < :maxAttempts
 			  AND (lease_until IS NULL OR lease_until <= CURRENT_TIMESTAMP)
 			  AND (
 			      (status = 'PENDING' AND attempt_count = 0 AND next_attempt_at IS NULL)
@@ -64,7 +64,8 @@ public interface ActivationRequestRepository extends JpaRepository<ActivationReq
 			  )
 			""", nativeQuery = true)
 	int tryClaim(@Param("id") UUID id, @Param("expectedVersion") long expectedVersion,
-			@Param("workerId") String workerId, @Param("leaseMillis") long leaseMillis);
+			@Param("workerId") String workerId, @Param("leaseMillis") long leaseMillis,
+			@Param("maxAttempts") int maxAttempts);
 
 	/** Libera apenas a posse vencida; nenhum resultado externo é inferido pela expiração. */
 	@Transactional(propagation = Propagation.MANDATORY)
@@ -96,11 +97,11 @@ public interface ActivationRequestRepository extends JpaRepository<ActivationReq
 			WHERE id = :id AND version = :expectedVersion
 			  AND status = 'PROCESSING' AND claimed_by = :workerId
 			  AND lease_until > CURRENT_TIMESTAMP
-			  AND reconciliation_required = false AND attempt_count < 3
+			  AND reconciliation_required = false AND attempt_count < :maxAttempts
 			  AND (next_attempt_at <= CURRENT_TIMESTAMP OR (attempt_count = 0 AND next_attempt_at IS NULL))
 			""", nativeQuery = true)
 	int tryPrepareAttempt(@Param("id") UUID id, @Param("expectedVersion") long expectedVersion,
-			@Param("workerId") String workerId);
+			@Param("workerId") String workerId, @Param("maxAttempts") int maxAttempts);
 
 	/** Resultado desconhecido não agenda retry nem encerra a solicitação por esgotamento de tentativas. */
 	@Transactional(propagation = Propagation.MANDATORY)
@@ -125,10 +126,10 @@ public interface ActivationRequestRepository extends JpaRepository<ActivationReq
 			UPDATE activation_requests
 			SET status = CASE
 			        WHEN :success THEN 'COMPLETED'
-			        WHEN :retryable AND attempt_count < 3 THEN 'PROCESSING'
+			        WHEN :retryable AND attempt_count < :maxAttempts THEN 'PROCESSING'
 			        ELSE 'FAILED' END,
 			    next_attempt_at = CASE
-			        WHEN :retryable AND NOT :success AND attempt_count < 3
+			        WHEN :retryable AND NOT :success AND attempt_count < :maxAttempts
 			        THEN GREATEST(CURRENT_TIMESTAMP + (:delayMillis * INTERVAL '1 millisecond'),
 			                      CAST(:retryAfter AS TIMESTAMP WITH TIME ZONE))
 			        ELSE NULL END,
@@ -140,13 +141,13 @@ public interface ActivationRequestRepository extends JpaRepository<ActivationReq
 			  AND lease_until > CURRENT_TIMESTAMP
 			  AND reconciliation_required = true AND attempt_count BETWEEN 1 AND 3
 			  AND attempt_count = :attemptCount
-			  AND (NOT :retryable OR :success OR attempt_count = 3 OR :delayMillis >= 1)
+			  AND (NOT :retryable OR :success OR attempt_count >= :maxAttempts OR :delayMillis >= 1)
 			""", nativeQuery = true)
 	int tryRecordConfirmedOutcome(@Param("id") UUID id, @Param("expectedVersion") long expectedVersion,
 			@Param("workerId") String workerId, @Param("attemptCount") int attemptCount,
 			@Param("success") boolean success, @Param("retryable") boolean retryable,
 			@Param("errorCode") @Nullable String errorCode, @Param("delayMillis") long delayMillis,
-			@Param("retryAfter") @Nullable Instant retryAfter);
+			@Param("retryAfter") @Nullable Instant retryAfter, @Param("maxAttempts") int maxAttempts);
 
 	Optional<ActivationRequest> findByIdAndConsumerId(UUID id, String consumerId);
 

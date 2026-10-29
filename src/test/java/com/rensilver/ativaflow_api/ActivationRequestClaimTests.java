@@ -203,9 +203,9 @@ class ActivationRequestClaimTests {
 		UUID id = insert("PENDING", 0, null, false, null);
 
 		new TransactionTemplate(transactionManager).executeWithoutResult(transaction -> {
-			var candidate = repository.findNextClaimCandidate().orElseThrow();
+			var candidate = repository.findNextClaimCandidate(3).orElseThrow();
 			assertThat(candidate.getId()).isEqualTo(id);
-			assertThat(repository.tryClaim(id, candidate.getVersion(), "worker-a", 45000)).isEqualTo(1);
+			assertThat(repository.tryClaim(id, candidate.getVersion(), "worker-a", 45000, 3)).isEqualTo(1);
 
 			// Mantém o claim real sem commit enquanto outra conexão tenta assumir a mesma linha.
 			try (var executor = Executors.newVirtualThreadPerTaskExecutor()) {
@@ -268,8 +268,8 @@ class ActivationRequestClaimTests {
 					UPDATE activation_requests SET next_attempt_at = CURRENT_TIMESTAMP,
 					    lease_until = CURRENT_TIMESTAMP, claimed_by = 'old-worker' WHERE id = ?
 					""", id);
-			assertThat(repository.findNextClaimCandidate()).isPresent();
-			assertThat(repository.tryClaim(id, 0, "worker-a", 45000)).isEqualTo(1);
+			assertThat(repository.findNextClaimCandidate(3)).isPresent();
+			assertThat(repository.tryClaim(id, 0, "worker-a", 45000, 3)).isEqualTo(1);
 		});
 	}
 
@@ -278,7 +278,7 @@ class ActivationRequestClaimTests {
 		UUID id = insert("PENDING", 0, null, false, null);
 		var before = jdbc.queryForMap("SELECT * FROM activation_requests WHERE id = ?", id);
 		new TransactionTemplate(transactionManager).executeWithoutResult(transaction ->
-				assertThat(repository.tryClaim(id, 1, "worker-a", 45000)).isZero());
+				assertThat(repository.tryClaim(id, 1, "worker-a", 45000, 3)).isZero());
 
 		assertThat(jdbc.queryForMap("SELECT * FROM activation_requests WHERE id = ?", id)).isEqualTo(before);
 	}
@@ -288,7 +288,7 @@ class ActivationRequestClaimTests {
 		UUID id = insert("PROCESSING", 2, -60, true, -60);
 		var before = jdbc.queryForMap("SELECT * FROM activation_requests WHERE id = ?", id);
 		new TransactionTemplate(transactionManager).executeWithoutResult(transaction ->
-				assertThat(repository.tryClaim(id, 0, "worker-a", 45000)).isZero());
+				assertThat(repository.tryClaim(id, 0, "worker-a", 45000, 3)).isZero());
 		assertThat(jdbc.queryForMap("SELECT * FROM activation_requests WHERE id = ?", id)).isEqualTo(before);
 	}
 
@@ -320,8 +320,8 @@ class ActivationRequestClaimTests {
 	void nativeClaimDiscardsManagedCandidateBeforeLaterFlush() {
 		UUID id = insert("PENDING", 0, null, false, null);
 		new TransactionTemplate(transactionManager).executeWithoutResult(transaction -> {
-			var candidate = repository.findNextClaimCandidate().orElseThrow();
-			assertThat(repository.tryClaim(id, candidate.getVersion(), "worker-a", 45000)).isEqualTo(1);
+			var candidate = repository.findNextClaimCandidate(3).orElseThrow();
+			assertThat(repository.tryClaim(id, candidate.getVersion(), "worker-a", 45000, 3)).isEqualTo(1);
 			var claimedRow = jdbc.queryForMap("SELECT * FROM activation_requests WHERE id = ?", id);
 
 			candidate.startProcessing();
@@ -363,11 +363,11 @@ class ActivationRequestClaimTests {
 		var before = jdbc.queryForMap("SELECT * FROM activation_requests WHERE id = ?", id);
 
 		new TransactionTemplate(transactionManager).executeWithoutResult(transaction ->
-				assertThat(repository.tryClaim(id, original.version(), "worker-a", 45000)).isZero());
+				assertThat(repository.tryClaim(id, original.version(), "worker-a", 45000, 3)).isZero());
 
 		assertThat(jdbc.queryForMap("SELECT * FROM activation_requests WHERE id = ?", id)).isEqualTo(before);
 		new TransactionTemplate(transactionManager).executeWithoutResult(transaction ->
-				assertThat(repository.tryClaim(id, replacement.version(), "worker-a", 45000)).isEqualTo(1));
+				assertThat(repository.tryClaim(id, replacement.version(), "worker-a", 45000, 3)).isEqualTo(1));
 		assertThat(repository.findById(id).orElseThrow().getVersion()).isEqualTo(replacement.version() + 1);
 	}
 

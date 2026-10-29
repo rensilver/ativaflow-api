@@ -152,7 +152,7 @@ a preparação registra a tentativa antes do HTTP e a recuperação libera a pos
 Os campos opcionais começam nulos; a sinalização de reconciliação
 permitirá manter um resultado ambíguo em
 `PROCESSING`, sem adicionar estados públicos. Claim, preparação e gravação de
-resultado aplicam o limite de três tentativas; a constraint do banco impede somente contagens
+resultado aplicam o limite configurado de até três tentativas totais; a constraint do banco impede somente contagens
 negativas. A unicidade de `external_id` continua global, inclusive entre
 consumidores. Os índices de listagem estão na V3; índices específicos para claim
 ainda não foram adicionados e dependerão da avaliação do plano e do volume de trabalho.
@@ -329,7 +329,7 @@ incrementa `version` e atualiza `updated_at`.
 | --- | --- |
 | `recordSuccess(attempt)` | `COMPLETED`, sem agendamento ou último erro. |
 | `recordPermanentFailure(attempt, errorCode)` | `FAILED`, sem agendamento, com código categorizado. |
-| `recordSafeTransientFailure(attempt, errorCode, retryAfter)` | Antes da terceira tentativa, `PROCESSING` com próximo instante futuro e erro; na terceira, `FAILED` sem agendamento. |
+| `recordSafeTransientFailure(attempt, errorCode, retryAfter)` | Antes do limite configurado, `PROCESSING` com próximo instante futuro e erro; ao atingir o limite, `FAILED` sem agendamento. |
 
 As operações retornam `true` após o commit; `false` significa que nenhuma linha
 foi alterada, por exemplo por perda de posse ou resultado já registrado. Contagem
@@ -346,9 +346,17 @@ três tentativas, esse teto não chega a ser atingido.
 
 | Variável | Padrão | Validação |
 | --- | --- | --- |
+| `WORKER_RETRY_MAX_ATTEMPTS` | `3` | Inteiro de 1 a 3; inclui a primeira tentativa. `1` desabilita reenvios. |
 | `WORKER_RETRY_INITIAL_DELAY` | `1s` | Pelo menos 1 ms. |
 | `WORKER_RETRY_MAX_DELAY` | `1m` | Maior ou igual ao atraso inicial. |
 | `WORKER_RETRY_JITTER_RATIO` | `0.25` | Número finito entre 0 e 1; zero desabilita jitter. |
+
+`ActivationRetryProperties` usa `@ConfigurationProperties("app.worker.retry")`
+e `@Validated`. Valores inválidos, atraso máximo menor que o inicial e overflow
+na representação em milissegundos ou na soma com jitter impedem a inicialização.
+O mesmo limite é aplicado à seleção de candidatos, ao claim condicional, à
+preparação de tentativas e ao registro de falhas seguras. Resultados ambíguos
+continuam bloqueados para reconciliação, inclusive na última tentativa configurada.
 
 O PostgreSQL persiste `next_attempt_at = max(CURRENT_TIMESTAMP + atraso, retryAfter)`.
 `retryAfter` é um `Instant` opcional já interpretado pela futura integração HTTP;
@@ -853,9 +861,10 @@ Nenhum perfil é ativado automaticamente. A seleção é feita por
 | `SHUTDOWN_TIMEOUT` | `30s`, limite por fase do desligamento gracioso. |
 
 Os timeouts HTTP e de desligamento aceitam unidades como `500ms`, `2s` e `1m`.
-O timeout do HikariCP é informado como inteiro em milissegundos. A URL e a chave
-reservada do provedor estão declaradas em `app.activation-provider`.
-O cliente utiliza os timeouts de `spring.http.client`, exigindo valores entre
+O timeout do HikariCP é informado como inteiro em milissegundos. Os timeouts, a URL
+e a chave reservada do provedor estão declarados em `app.activation-provider`.
+`ActivationProviderProperties` usa `@ConfigurationProperties` e `@Validated`.
+O cliente utiliza `connect-timeout` e `read-timeout` desse prefixo, exigindo valores entre
 `1ms` e `2147483647ms`, e desabilita redirecionamentos. A chave reservada não é
 enviada, pois o contrato simulado não define autenticação.
 

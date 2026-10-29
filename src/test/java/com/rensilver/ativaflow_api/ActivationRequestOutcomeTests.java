@@ -242,7 +242,7 @@ class ActivationRequestOutcomeTests {
 		new TransactionTemplate(transactionManager).executeWithoutResult(transaction -> {
 			var before = jdbc.queryForMap("SELECT * FROM activation_requests WHERE id = ?", attempt.id());
 			assertThat(repository.tryRecordConfirmedOutcome(attempt.id(), attempt.version(), attempt.claimedBy(),
-					1, false, true, "PROVIDER_BUSY", delayMillis, null)).isZero();
+					1, false, true, "PROVIDER_BUSY", delayMillis, null, 3)).isZero();
 			assertThat(jdbc.queryForMap("SELECT * FROM activation_requests WHERE id = ?", attempt.id())).isEqualTo(before);
 		});
 	}
@@ -255,10 +255,10 @@ class ActivationRequestOutcomeTests {
 			var before = jdbc.queryForMap("SELECT * FROM activation_requests WHERE id = ?", attempt.id());
 			for (boolean success : new boolean[]{true, false}) {
 				assertThat(repository.tryRecordConfirmedOutcome(attempt.id(), attempt.version(), attempt.claimedBy(),
-						1, success, false, success ? null : "PROVIDER_REJECTED", 0, null)).isZero();
+						1, success, false, success ? null : "PROVIDER_REJECTED", 0, null, 3)).isZero();
 			}
 			assertThat(repository.tryRecordConfirmedOutcome(attempt.id(), attempt.version(), attempt.claimedBy(),
-					1, false, true, "PROVIDER_BUSY", 1000, null)).isZero();
+					1, false, true, "PROVIDER_BUSY", 1000, null, 3)).isZero();
 			assertThat(jdbc.queryForMap("SELECT * FROM activation_requests WHERE id = ?", attempt.id())).isEqualTo(before);
 		});
 	}

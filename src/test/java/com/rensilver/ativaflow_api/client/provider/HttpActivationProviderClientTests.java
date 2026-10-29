@@ -123,7 +123,7 @@ class HttpActivationProviderClientTests {
 	void configuredReadTimeoutProducesAnIndeterminateResultWithoutRetry(WireMockRuntimeInfo wireMock) {
 		stubFor(post(PATH).willReturn(aResponse().withStatus(204).withFixedDelay(1000)));
 		contextRunner.withPropertyValues("app.activation-provider.base-url=" + wireMock.getHttpBaseUrl(),
-				"spring.http.client.connect-timeout=200ms", "spring.http.client.read-timeout=100ms")
+				"app.activation-provider.connect-timeout=200ms", "app.activation-provider.read-timeout=100ms")
 				.run(context -> assertThat(context.getBean(ActivationProviderClient.class).activate(REQUEST))
 						.isEqualTo(new ProviderOutcome.Indeterminate("PROVIDER_COMMUNICATION_FAILURE")));
 		verify(1, postRequestedFor(urlEqualTo(PATH)));
@@ -150,8 +150,10 @@ class HttpActivationProviderClientTests {
 	}
 
 	@ParameterizedTest
-	@ValueSource(strings = {"spring.http.client.connect-timeout=0ms", "spring.http.client.connect-timeout=-1ms",
-			"spring.http.client.read-timeout=0ms", "spring.http.client.read-timeout=-1ms"})
+	@ValueSource(strings = {"app.activation-provider.connect-timeout=0ms", "app.activation-provider.connect-timeout=-1ms",
+			"app.activation-provider.read-timeout=0ms", "app.activation-provider.read-timeout=-1ms",
+			"app.activation-provider.connect-timeout=999999ns", "app.activation-provider.read-timeout=2147483648ms",
+			"app.activation-provider.read-timeout=invalid"})
 	void rejectsUnboundedOrNegativeTimeouts(String property, WireMockRuntimeInfo wireMock) {
 		contextRunner.withPropertyValues("app.activation-provider.base-url=" + wireMock.getHttpBaseUrl(), property)
 				.run(context -> assertThat(context).hasFailed());

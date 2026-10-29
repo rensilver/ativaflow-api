@@ -3,9 +3,11 @@ package com.rensilver.ativaflow_api.service;
 import java.util.Objects;
 import java.util.Optional;
 
+import com.rensilver.ativaflow_api.config.ActivationRetryProperties;
 import com.rensilver.ativaflow_api.repository.ActivationRequestRepository;
 import com.rensilver.ativaflow_api.service.model.ClaimedActivationRequest;
 import com.rensilver.ativaflow_api.service.model.PreparedActivationAttempt;
+import org.springframework.boot.context.properties.EnableConfigurationProperties;
 import org.springframework.lang.Nullable;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Propagation;
@@ -13,18 +15,21 @@ import org.springframework.transaction.annotation.Transactional;
 
 /** Registra tentativas e resultados ambíguos em transações curtas, sem realizar HTTP. */
 @Service
+@EnableConfigurationProperties(ActivationRetryProperties.class)
 public class ActivationRequestAttemptService {
 
 	private final ActivationRequestRepository repository;
+	private final int maxAttempts;
 
-	public ActivationRequestAttemptService(ActivationRequestRepository repository) {
+	public ActivationRequestAttemptService(ActivationRequestRepository repository, ActivationRetryProperties retryProperties) {
 		this.repository = repository;
+		this.maxAttempts = retryProperties.maxAttempts();
 	}
 
 	/** Vazio significa perda de posse ou envio inseguro: não autoriza chamar o provedor. */
 	@Transactional(propagation = Propagation.REQUIRES_NEW)
 	public Optional<PreparedActivationAttempt> prepareAttempt(ClaimedActivationRequest claim) {
-		int affectedRows = repository.tryPrepareAttempt(claim.id(), claim.version(), claim.claimedBy());
+		int affectedRows = repository.tryPrepareAttempt(claim.id(), claim.version(), claim.claimedBy(), maxAttempts);
 		if (affectedRows == 0) {
 			return Optional.empty();
 		}
