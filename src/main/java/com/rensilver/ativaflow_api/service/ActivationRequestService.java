@@ -23,16 +23,18 @@ import org.springframework.transaction.annotation.Transactional;
 @RequiredArgsConstructor
 public class ActivationRequestService {
 
+	public static final int MAX_PAGE_SIZE = 100;
+
 	private final ActivationRequestRepository repository;
 	private final ActivationRequestMapper mapper;
 
 	@Transactional(readOnly = true)
 	public ActivationRequestPageResponse listActivationRequests(@Nullable ActivationStatus status, @Nullable String customerId,
 			int page, int size, String trustedConsumerId) {
-		PageRequest pageable = PageRequest.of(page, size, Sort.by(Sort.Direction.DESC, "createdAt", "id"));
-		if (pageable.getOffset() > Integer.MAX_VALUE) {
+		if (page < 0 || size < 1 || size > MAX_PAGE_SIZE || (long) page * size > Integer.MAX_VALUE) {
 			throw new InvalidPaginationException();
 		}
+		PageRequest pageable = PageRequest.of(page, size, Sort.by(Sort.Direction.DESC, "createdAt", "id"));
 		Page<ActivationRequestResponse> result = repository.findAllByFilters(trustedConsumerId, status, customerId, pageable)
 				.map(mapper::toResponse);
 		return new ActivationRequestPageResponse(result.getContent(), result.getNumber(), result.getSize(),

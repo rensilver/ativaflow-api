@@ -39,7 +39,7 @@ public class ActivationRequestController {
 			@RequestParam(required = false) @Nullable @Size(max = 100)
 			@Pattern(regexp = "(?s).*\\P{javaWhitespace}.*", message = "must contain non-blank text") String customerId,
 			@RequestParam(defaultValue = "0") @Min(0) int page,
-			@RequestParam(defaultValue = "20") @Min(1) @Max(100) int size,
+			@RequestParam(defaultValue = "20") @Min(1) @Max(ActivationRequestService.MAX_PAGE_SIZE) int size,
 			Principal principal) {
 		return ResponseEntity.ok(service.listActivationRequests(status, customerId, page, size, principal.getName()));
 	}

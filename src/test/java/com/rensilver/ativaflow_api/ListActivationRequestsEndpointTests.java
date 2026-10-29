@@ -4,6 +4,8 @@ import java.time.OffsetDateTime;
 import java.util.UUID;
 
 import com.rensilver.ativaflow_api.domain.ActivationStatus;
+import com.rensilver.ativaflow_api.exception.InvalidPaginationException;
+import com.rensilver.ativaflow_api.service.ActivationRequestService;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.CsvSource;
@@ -18,6 +20,7 @@ import org.springframework.test.context.ActiveProfiles;
 import org.springframework.test.web.servlet.MockMvc;
 import org.springframework.transaction.annotation.Transactional;
 
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.springframework.security.test.web.servlet.request.SecurityMockMvcRequestPostProcessors.user;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.content;
@@ -42,6 +45,16 @@ class ListActivationRequestsEndpointTests {
 
 	@Autowired
 	private JdbcTemplate jdbcTemplate;
+
+	@Autowired
+	private ActivationRequestService service;
+
+	@ParameterizedTest
+	@CsvSource({"0, 101", "0, 2147483647", "0, 0", "0, -1", "-1, 20", "2147483647, 20"})
+	void rejectsInvalidPaginationEvenWhenCalledOutsideController(int page, int size) {
+		assertThatThrownBy(() -> service.listActivationRequests(null, null, page, size, CONSUMER))
+				.isInstanceOf(InvalidPaginationException.class);
+	}
 
 	@Test
 	void listsOnlyOwnedPublicRepresentationsWithDefaultPaginationAndStableOrder() throws Exception {

@@ -1,9 +1,9 @@
 package com.rensilver.ativaflow_api.exception;
 
-/** A página solicitada excede o intervalo de deslocamentos suportado pela persistência. */
+/** Página, tamanho ou deslocamento fora dos limites suportados pela listagem. */
 public class InvalidPaginationException extends RuntimeException {
 
 	public InvalidPaginationException() {
-		super("Pagination offset exceeds supported range");
+		super("Pagination parameters exceed supported range");
 	}
 }

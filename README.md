@@ -331,6 +331,11 @@ totais de outros consumidores.
 `page` e `size` vazios usam os respectivos padrões. Valores inválidos retornam
 `400 Bad Request` com `Content-Type: application/problem+json`. O deslocamento
 `page * size` deve ser no máximo `2147483647`, limite da paginação JPA.
+O serviço também valida página, tamanho e deslocamento antes de consultar o
+repositório, inclusive em chamadas que não passam pelo controller. O máximo de
+100 itens é compartilhado com a validação HTTP; valores maiores são rejeitados,
+sem truncamento silencioso. O limite mantém o conteúdo carregado e serializado
+por chamada sob controle.
 
 A ordenação é fixa em `createdAt DESC, id DESC`, incluindo o desempate por UUID
 no PostgreSQL. O parâmetro `sort` não altera essa ordem. A paginação ocorre no
@@ -376,6 +381,65 @@ Sem correspondências, `content` é `[]`, `totalElements` e `totalPages` são `0
 Uma página além da última também retorna `200` e `content: []`, preservando os
 totais dos filtros e o número da página solicitada. A rota exige autenticação;
 com `Accept: application/json`, chamadas anônimas recebem `401`.
+
+### Acesso ao banco e índices da listagem
+
+A premissa de acesso é consultar as solicitações mais recentes de um consumidor,
+com filtros opcionais por status e/ou cliente. O repositório constrói predicados
+de igualdade apenas para os filtros presentes, sempre incluindo `consumer_id`.
+A mesma especificação JPA é aplicada ao conteúdo e à contagem. `ORDER BY`,
+`OFFSET` e o limite da página também são executados no PostgreSQL; não há
+filtragem ou paginação em memória.
+
+A migração **V3** adiciona três índices B-tree não únicos:
+
+| Acesso esperado | Colunas do índice, na ordem |
+| --- | --- |
+| Listagem recente do consumidor | `(consumer_id, created_at DESC, id DESC)` |
+| Listagem do consumidor por status | `(consumer_id, status, created_at DESC, id DESC)` |
+| Listagem do consumidor por cliente | `(consumer_id, customer_id, created_at DESC, id DESC)` |
+
+As igualdades ocupam o início de cada índice; as colunas seguintes correspondem
+à ordenação fixa, incluindo o desempate por ID. Isso permite buscar a página
+diretamente na ordem do índice. O índice sem filtros é necessário porque deixar
+`status` ou `customer_id` livres antes de `created_at` não atende à ordenação
+global do consumidor. Essa escolha segue as regras do PostgreSQL para
+[índices compostos](https://www.postgresql.org/docs/17/indexes-multicolumn.html) e
+[índices com ORDER BY e LIMIT](https://www.postgresql.org/docs/17/indexes-ordering.html).
+
+Com os dois filtros, o planejador pode usar um dos índices filtrados e aplicar
+o outro predicado como filtro residual. Não foi adicionado um quarto índice
+`(consumer_id, customer_id, status, created_at DESC, id DESC)`: falta evidência de
+que essa combinação seja predominante para justificar espaço e manutenção a
+cada escrita. Também não há índice isolado de `consumer_id` (prefixo já coberto),
+índice isolado de status (apenas quatro valores e nenhum acesso global na API)
+ou `(consumer_id, id)` (a chave primária já localiza no máximo uma linha por ID;
+o consumidor é verificado no SQL da consulta individual).
+
+`FlywayMigrationTests` prepara 16.000 linhas distribuídas entre 20 consumidores,
+quatro status e 20 clientes, atualiza estatísticas com `ANALYZE` e executa
+`EXPLAIN (ANALYZE, BUFFERS)` nas três listagens da tabela acima. Verifica que cada
+uma usa o índice correspondente sem uma etapa `Sort`, sem forçar opções do
+planejador. É evidência para essa distribuição sintética, não uma medição de
+produção. Para reavaliar com dados representativos, execute, por exemplo:
+
+```sql
+EXPLAIN (ANALYZE, BUFFERS)
+SELECT * FROM activation_requests
+WHERE consumer_id = 'consumer-1' AND status = 'PENDING'
+ORDER BY created_at DESC, id DESC LIMIT 20 OFFSET 0;
+
+EXPLAIN (ANALYZE, BUFFERS)
+SELECT count(*) FROM activation_requests
+WHERE consumer_id = 'consumer-1' AND status = 'PENDING';
+```
+
+Repita sem status, com `customer_id` e com ambos, usando tamanhos e deslocamentos
+representativos. O máximo de 100 limita o conteúdo da resposta; a contagem exata
+ainda percorre as correspondências e páginas profundas ainda têm custo de
+`OFFSET`. Revise planos, buffers e frequência real antes de ampliar os índices.
+A V3 usa `CREATE INDEX` transacional, que bloqueia escritas durante a construção;
+em tabelas grandes, programe essa migração em uma janela adequada.
 
 ## Perfis e variáveis de ambiente
 
@@ -470,7 +534,7 @@ e ao health check. `TestcontainersConfiguration` disponibiliza PostgreSQL com a
 imagem `postgres:17-alpine`, sem depender do banco ou das credenciais locais.
 `RestClientWireMockTests` verifica uma chamada HTTP com `RestClient` e um
 servidor WireMock iniciado pelo próprio teste.
-`FlywayMigrationTests` verifica a aplicação e validação das migrações V1 e V2,
+`FlywayMigrationTests` verifica a aplicação e validação das migrações V1, V2 e V3,
 persistência dos campos públicos e internos, valores padrão, obrigatoriedade
 de proprietário não vazio, rejeição de contadores negativos, unicidade global
 de `external_id` entre consumidores e rejeição de status desconhecido no
@@ -509,7 +573,11 @@ usa esperas para coordenar a execução.
 filtros isolados e combinados com AND, igualdade exata de `customerId`, os quatro
 status, parâmetros inválidos, páginas vazias e isolamento de conteúdo e totais
 entre consumidores. Também verifica os sete campos públicos e a ordenação
-`createdAt DESC, id DESC`, inclusive empates de data em páginas distintas.
+`createdAt DESC, id DESC`, inclusive empates de data em páginas distintas, e a
+rejeição de paginação inválida em chamadas diretas ao serviço.
+`ActivationRequestQueryTests` captura o SQL real das quatro combinações de
+filtros e verifica o escopo de consumidor no conteúdo e na contagem, predicados
+apenas para filtros presentes e paginação/ordenação no banco.
 
 Também é possível executar a aplicação com o PostgreSQL do Testcontainers e o
 perfil `test` por meio de `TestAtivaflowApiApplication`:

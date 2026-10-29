@@ -108,9 +108,37 @@ class FlywayMigrationTests {
 	void appliesAndValidatesAllMigrations() {
 		assertThat(flyway.info().applied())
 				.extracting(migration -> migration.getVersion().getVersion())
-				.containsExactly("1", "2");
+				.containsExactly("1", "2", "3");
 		assertThat(flyway.info().pending()).isEmpty();
 		assertThat(flyway.validateWithResult().validationSuccessful).isTrue();
+	}
+
+	@Test
+	void servesConsumerListingsInIndexOrderWithAndWithoutFilters() {
+		jdbcTemplate.update("""
+				INSERT INTO activation_requests
+				    (id, external_id, customer_id, product_code, consumer_id, status, created_at)
+				SELECT md5('index-plan-' || n)::uuid, 'INDEX-PLAN-' || n,
+				       'customer-' || ((n / 80) % 20), 'PRODUCT-1', 'consumer-' || (n % 20),
+				       (ARRAY['PENDING', 'PROCESSING', 'COMPLETED', 'FAILED'])[1 + ((n / 20) % 4)],
+				       TIMESTAMPTZ '2026-10-28 15:00:00+00' + n * INTERVAL '1 second'
+				FROM generate_series(1, 16000) AS n
+				""");
+		jdbcTemplate.execute("ANALYZE activation_requests");
+
+		assertListingPlan("", "idx_activation_requests_consumer_created_id");
+		assertListingPlan("AND status = 'PENDING'", "idx_activation_requests_consumer_status_created_id");
+		assertListingPlan("AND customer_id = 'customer-1'", "idx_activation_requests_consumer_customer_created_id");
+	}
+
+	private void assertListingPlan(String filter, String expectedIndex) {
+		String plan = String.join("\n", jdbcTemplate.queryForList("""
+				EXPLAIN (ANALYZE, BUFFERS, COSTS OFF)
+				SELECT * FROM activation_requests
+				WHERE consumer_id = 'consumer-1' %s
+				ORDER BY created_at DESC, id DESC LIMIT 20 OFFSET 0
+				""".formatted(filter), String.class));
+		assertThat(plan).contains(expectedIndex).doesNotContain("Sort");
 	}
 
 	@Test
