@@ -302,6 +302,24 @@ Conteúdo divergente ou colisão com outro consumidor retorna `409 Conflict`
 com `ProblemDetail` e a mensagem genérica `Activation request conflict`, sem
 alterar a linha original nem revelar sua representação ou proprietário.
 
+O conflito usa `Content-Type: application/problem+json`, sem header `Location`:
+
+```json
+{
+  "type": "about:blank",
+  "title": "Conflict",
+  "status": 409,
+  "detail": "Activation request conflict",
+  "instance": "/api/v1/requests"
+}
+```
+
+Por exemplo, após criar `EXT-12345` com `CUST-10001` e `INTERNET-500`, reenviar
+esse `externalId` com outro cliente ou produto resulta nesse erro. Espaços e
+diferenças entre maiúsculas e minúsculas também contam como divergência.
+A mesma resposta genérica é usada para colisões entre consumidores, mesmo
+quando cliente e produto coincidem, evitando revelar dados do registro existente.
+
 A consulta prévia evita inserções desnecessárias, mas não garante unicidade
 entre chamadas simultâneas. A inserção usa uma transação própria: se perder a
 disputa pela constraint `uk_activation_requests_external_id`, termina com
@@ -613,6 +631,10 @@ e criações paralelas com barreira de início. Um cenário mantém a primeira
 inserção sem commit e observa três inserções bloqueadas no PostgreSQL antes
 de liberá-la, comprovando a recuperação após a disputa real da constraint,
 sem mocks de repositório.
+O contrato de conflito exige os cinco campos de Problem Details, sem campos
+extras ou `Location`, nos quatro status. A disputa real da constraint também
+cobre cliente, produto e consumidor divergentes: as chamadas perdedoras recebem
+`409`, preservando todos os campos da linha vencedora e sem chamar o provedor.
 Os contratos HTTP também cobrem campos obrigatórios ausentes, corpo vazio ou
 JSON inválido, rejeição de propriedades desconhecidas e de todos os metadados
 controlados pelo servidor, inclusive timestamps válidos enviados pelo cliente.
