@@ -262,6 +262,9 @@ Após o commit, a API responde `201 Created`, com
 O UUID é gerado pelo servidor; `createdAt` e `updatedAt` são preenchidos pela
 auditoria JPA e expostos em UTC. A resposta é a fotografia imutável da criação
 em `PENDING`. A criação não chama o provedor nem inicia processamento externo.
+Esse corpo conserva o status e as datas da criação mesmo que um processamento
+posterior avance o registro antes de o JSON ser enviado. O `201` confirma a
+criação persistida; a conclusão da ativação pertence à etapa de processamento.
 Dados inválidos, propriedades desconhecidas ou campos controlados pelo servidor
 no JSON resultam em `400 Bad Request`, sem inserção.
 
@@ -403,6 +406,12 @@ real, sem transação de teste, para verificar commit, `PENDING`, proprietário
 autenticado, auditoria, `201`, `Location` e os sete campos públicos. Também verifica
 `400` sem inserção para campos inválidos/controlados pelo servidor, além de
 preservação da autenticação e da proteção CSRF.
+Dois cenários adicionais protegem o contrato de criação: WireMock configurado
+com atraso e `503` recebe zero chamadas durante o `POST`; um advice exclusivo
+do teste simula o worker via SQL após o commit e antes da serialização,
+avançando a linha até `COMPLETED` e alterando `updatedAt`. O JSON continua em
+`PENDING`, com as datas originais. Essa simulação não implementa o worker nem
+usa esperas para coordenar a execução.
 
 Também é possível executar a aplicação com o PostgreSQL do Testcontainers e o
 perfil `test` por meio de `TestAtivaflowApiApplication`:
