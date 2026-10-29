@@ -1,7 +1,10 @@
 package com.rensilver.ativaflow_api.service;
 
+import java.util.UUID;
+
 import com.rensilver.ativaflow_api.dto.request.CreateActivationRequest;
 import com.rensilver.ativaflow_api.dto.response.ActivationRequestResponse;
+import com.rensilver.ativaflow_api.exception.ActivationRequestNotFoundException;
 import com.rensilver.ativaflow_api.mapper.ActivationRequestMapper;
 import com.rensilver.ativaflow_api.model.ActivationRequest;
 import com.rensilver.ativaflow_api.repository.ActivationRequestRepository;
@@ -15,6 +18,13 @@ public class ActivationRequestService {
 
 	private final ActivationRequestRepository repository;
 	private final ActivationRequestMapper mapper;
+
+	@Transactional(readOnly = true)
+	public ActivationRequestResponse getById(UUID id, String trustedConsumerId) {
+		ActivationRequest entity = repository.findByIdAndConsumerId(id, trustedConsumerId)
+				.orElseThrow(ActivationRequestNotFoundException::new);
+		return mapper.toResponse(entity);
+	}
 
 	@Transactional
 	public ActivationRequestResponse create(CreateActivationRequest request, String trustedConsumerId) {

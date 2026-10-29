@@ -4,9 +4,9 @@ Projeto Java 21 com Spring Boot 3.5.16, organizado em camadas para uma API REST.
 A base atual reúne dependências, configurações por ambiente, estrutura de pacotes,
 migrações, entidade JPA com transições de estado, auditoria e controle otimista,
 e DTOs públicos como records com Bean Validation na entrada, além da criação
-de solicitações por `POST /api/v1/requests`.
+de solicitações por `POST /api/v1/requests` e consulta por `GET /api/v1/requests/{id}`.
 Os pacotes de aplicação possuem suas responsabilidades descritas em
-`package-info.java`; consultas e integração com o provedor ainda estão pendentes.
+`package-info.java`; listagem e integração com o provedor ainda estão pendentes.
 
 ## Tecnologias e dependências
 
@@ -283,7 +283,37 @@ curl -i -X POST http://localhost:8080/api/v1/requests \
 
 JWT, escopos e a política HTTP para repetições de `externalId` ainda estão
 pendentes; a constraint de unicidade global continua garantida pelo PostgreSQL.
-As rotas de consulta ainda não estão implementadas.
+
+## Consulta de solicitação
+
+`GET /api/v1/requests/{id}` recebe um UUID e retorna `200 OK` com os mesmos sete
+campos públicos da criação, refletindo o status e as datas atuais no banco.
+O consumidor é obtido de `Principal.getName()`, e a consulta filtra pelo ID e
+pelo proprietário no PostgreSQL. Metadados internos de processamento não são expostos.
+
+```bash
+curl -i "http://localhost:8080/api/v1/requests/$REQUEST_ID" \
+  --user "$API_USER:$API_PASSWORD" \
+  --header 'Accept: application/json'
+```
+
+Um UUID inexistente ou pertencente a outro consumidor produz a mesma resposta
+`404 Not Found`, com `Content-Type: application/problem+json`, sem revelar a
+existência ou os dados de solicitações alheias:
+
+```json
+{
+  "type": "about:blank",
+  "title": "Not Found",
+  "status": 404,
+  "detail": "Activation request not found",
+  "instance": "/api/v1/requests/0b7f3c1e-5d2a-4c4e-9a51-2f8d7b1e6c90"
+}
+```
+
+Um ID que não seja UUID resulta em `400 Bad Request`. A consulta exige
+autenticação; com `Accept: application/json`, chamadas anônimas recebem `401`.
+A listagem de solicitações ainda está pendente.
 
 ## Perfis e variáveis de ambiente
 
