@@ -127,6 +127,11 @@ adiciona os campos internos abaixo, preservando a V1 e o contrato público:
 | `last_error_code` | `VARCHAR(100)`, opcional; código categorizado da última falha, sem payload, credenciais ou resposta bruta do provedor. |
 | `reconciliation_required` | `BOOLEAN`, obrigatório, padrão `false`; indica resultado externo indeterminado que exige reconciliação. |
 
+A migração `V4__add_activation_request_correlation_id.sql` acrescenta
+`correlation_id VARCHAR(128)`, opcional e imutável na entidade. Ela preserva a
+correlação da criação até o worker, sem alterar os campos JSON públicos. Registros
+anteriores continuam válidos com esse campo nulo.
+
 O contrato de uso desses campos está definido na
 [ADR-0001 — Metadados de processamento](docs/adr/0001-metadados-de-processamento.md),
 incluindo contagem antes do envio, próximo agendamento, validade do lease,
@@ -411,8 +416,24 @@ com credenciais, query ou fragmento. Um prefixo de caminho na URL base é preser
 O builder configurado pelo Spring Boot é utilizado com transporte JDK e HTTP/1.1
 explícitos, sem redirecionamentos automáticos. O cliente executa uma única
 tentativa e não persiste nem altera estados. O mapping WireMock de sucesso está
-disponível no Compose para demonstração local. Metadados de correlação e worker
-continuam pendentes.
+disponível no Compose para demonstração local. O worker recupera a correlação
+persistida antes da chamada ao provedor.
+
+`CorrelationIdFilter` executa antes dos filtros de segurança e devolve
+`X-Correlation-ID` no header da resposta. Aceita um único header de entrada com
+1 a 128 caracteres ASCII: primeiro caractere alfanumérico e demais caracteres
+alfanuméricos, `.`, `_`, `:` ou `-`. Header ausente, inválido ou repetido é
+substituído por um UUID gerado pelo servidor, sem registrar o valor rejeitado.
+A criação persiste esse identificador; um POST duplicado preserva a correlação da
+solicitação original. Não é chave de idempotência nem campo do payload de negócio.
+
+O worker usa o identificador persistido em cada tentativa, inclusive após reinício
+ou em outra instância. Para registros antigos sem correlação válida, usa o UUID
+da solicitação. O contexto `correlationId` no MDC fica limitado à execução e é
+restaurado ao final, inclusive em exceções. O cliente HTTP envia apenas a correlação
+válida do contexto atual em `X-Correlation-ID`; não copia `Authorization`, cookies
+ou o JWT do consumidor. A autenticação própria de um provedor real depende de
+contrato futuro.
 
 A chamada envia `Content-Type: application/json` e apenas os três valores
 persistidos, sem normalização:
@@ -1019,7 +1040,14 @@ dinâmica: URL com prefixo, payload exato com Unicode e espaços, classificaçã
 respostas, `Retry-After`, timeout de leitura, falha de conexão e ausência de retry
 ou redirecionamento automático. Também verifica rejeição de configuração inválida
 na inicialização, sem exigir banco ou Compose.
-`FlywayMigrationTests` verifica a aplicação e validação das migrações V1, V2 e V3,
+`CorrelationIdFilterTests`, `HttpActivationProviderCorrelationTests` e
+`ActivationRequestCorrelationPropagationTests` verificam geração/validação do
+header, passagem do POST até tentativas posteriores do worker, preservação na
+duplicidade, fallback para registros antigos, restauração do MDC e ausência do
+JWT no HTTP externo. Usam MockMvc standalone e MockRestServiceServer, sem banco,
+servidor HTTP ou contexto completo da aplicação. O repositório é simulado; esses
+testes não validam a aplicação da V4 no PostgreSQL.
+`FlywayMigrationTests` verifica a aplicação e validação das migrações V1 a V4,
 persistência dos campos públicos e internos, valores padrão, obrigatoriedade
 de proprietário não vazio, rejeição de contadores negativos e rejeição de status
 desconhecido no PostgreSQL real. Para a unicidade global de `external_id`, consulta

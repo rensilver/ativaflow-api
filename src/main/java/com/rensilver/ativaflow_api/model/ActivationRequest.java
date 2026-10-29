@@ -43,6 +43,10 @@ public class ActivationRequest {
 	@Column(name = "consumer_id", nullable = false, length = 100, updatable = false)
 	private String consumerId;
 
+	@Column(name = "correlation_id", length = 128, updatable = false)
+	@Nullable
+	private String correlationId;
+
 	@Enumerated(EnumType.STRING)
 	@Column(name = "status", nullable = false, length = 20)
 	private ActivationStatus status;
@@ -98,6 +102,14 @@ public class ActivationRequest {
 	public static ActivationRequest create(@Nullable String externalId, @Nullable String customerId,
 			@Nullable String productCode, @Nullable String trustedConsumerId) {
 		return new ActivationRequest(externalId, customerId, productCode, trustedConsumerId);
+	}
+
+	/** Preserva a correlação capturada na entrada para processamento assíncrono e retries. */
+	public static ActivationRequest create(@Nullable String externalId, @Nullable String customerId,
+			@Nullable String productCode, @Nullable String trustedConsumerId, @Nullable String correlationId) {
+		var request = create(externalId, customerId, productCode, trustedConsumerId);
+		request.correlationId = correlationId;
+		return request;
 	}
 
 	private ActivationRequest(@Nullable String externalId, @Nullable String customerId,

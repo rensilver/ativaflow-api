@@ -4,6 +4,7 @@ import java.util.UUID;
 
 import com.rensilver.ativaflow_api.client.provider.ActivationProviderClient;
 import com.rensilver.ativaflow_api.client.provider.dto.ActivationProviderRequest;
+import com.rensilver.ativaflow_api.observability.CorrelationId;
 import com.rensilver.ativaflow_api.repository.ActivationRequestRepository;
 import com.rensilver.ativaflow_api.service.ActivationRequestAttemptService;
 import com.rensilver.ativaflow_api.service.ActivationRequestClaimService;
@@ -60,9 +61,14 @@ public class ActivationRequestWorker {
 
 		var request = repository.findById(attempt.orElseThrow().id()).orElseThrow(
 				() -> new IllegalStateException("Prepared activation request no longer exists"));
-		var outcome = provider.activate(new ActivationProviderRequest(
-				request.getExternalId(), request.getCustomerId(), request.getProductCode()));
-		outcomes.record(attempt.orElseThrow(), outcome);
+		// O worker pode executar em outra thread/instância: a fonte é o registro persistido, nunca o MDC herdado.
+		String correlationId = CorrelationId.isValid(request.getCorrelationId())
+				? request.getCorrelationId() : request.getId().toString();
+		try (var ignored = CorrelationId.withId(correlationId)) {
+			var outcome = provider.activate(new ActivationProviderRequest(
+					request.getExternalId(), request.getCustomerId(), request.getProductCode()));
+			outcomes.record(attempt.orElseThrow(), outcome);
+		}
 		return true;
 	}
 }

@@ -24,6 +24,16 @@ pendente. Os endpoints públicos e o schema do banco não mudam.
 | Correlação | Propagar `X-Correlation-ID` quando disponível; não é campo de negócio nem chave de idempotência. |
 | Autenticação | O mock não exige credencial. O contrato real deverá definir o mecanismo antes de seu uso. `ACTIVATION_PROVIDER_API_KEY` é apenas uma reserva de configuração e não define um header. |
 
+A implementação de correlação aceita um único `X-Correlation-ID` de entrada com
+1 a 128 caracteres ASCII (primeiro alfanumérico; demais alfanuméricos, `.`, `_`,
+`:` ou `-`). Ausência, valor inválido ou headers repetidos geram um UUID, devolvido
+no header da resposta. O identificador é persistido em `correlation_id` pela V4 e
+reutilizado pelo worker em todas as tentativas; POSTs duplicados mantêm o original.
+Registros anteriores sem correlação válida usam seu UUID como fallback estável.
+O contexto MDC é restaurado ao terminar cada execução, inclusive em falhas.
+O cliente HTTP lê apenas essa correlação; não copia headers da requisição pública
+nem credenciais do contexto de segurança.
+
 O corpo contém exclusivamente os dados persistidos da solicitação:
 
 ```json

@@ -4,6 +4,7 @@ import java.net.SocketTimeoutException;
 import java.net.http.HttpTimeoutException;
 import com.rensilver.ativaflow_api.client.provider.dto.ActivationProviderRequest;
 import com.rensilver.ativaflow_api.domain.ProviderOutcome;
+import com.rensilver.ativaflow_api.observability.CorrelationId;
 import org.springframework.http.MediaType;
 import org.springframework.web.client.RestClient;
 import org.springframework.web.client.RestClientException;
@@ -23,6 +24,12 @@ public class HttpActivationProviderClient implements ActivationProviderClient {
 			return restClient.post()
 					.uri("/provider/v1/activate")
 					.contentType(MediaType.APPLICATION_JSON)
+					.headers(headers -> {
+						String correlationId = CorrelationId.current();
+						if (correlationId != null) {
+							headers.set(CorrelationId.HEADER, correlationId);
+						}
+					})
 					.body(request)
 					.exchange((httpRequest, response) -> {
 						return switch (response.getStatusCode().value()) {

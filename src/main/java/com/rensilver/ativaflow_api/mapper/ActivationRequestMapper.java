@@ -23,7 +23,7 @@ public interface ActivationRequestMapper {
 	 * Cada propriedade de origem omitida deve ser revisada como metadado interno.
 	 */
 	@BeanMapping(ignoreUnmappedSourceProperties = {
-			"consumerId", "version", "attemptCount", "nextAttemptAt",
+			"consumerId", "correlationId", "version", "attemptCount", "nextAttemptAt",
 			"leaseUntil", "claimedBy", "lastErrorCode", "reconciliationRequired"
 	})
 	@Nullable
