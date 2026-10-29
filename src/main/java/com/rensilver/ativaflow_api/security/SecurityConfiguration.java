@@ -42,7 +42,7 @@ public class SecurityConfiguration {
 				.httpBasic(AbstractHttpConfigurer::disable)
 				.logout(AbstractHttpConfigurer::disable)
 				.oauth2ResourceServer(resourceServer -> resourceServer
-						.jwt(withDefaults())
+						.jwt(jwt -> jwt.jwtAuthenticationConverter(new ConsumerJwtAuthenticationConverter()))
 						.authenticationEntryPoint(problemHandler)
 						.accessDeniedHandler(problemHandler))
 				.build();

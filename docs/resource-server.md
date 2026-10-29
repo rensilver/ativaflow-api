@@ -67,10 +67,36 @@ local emite `scope="requests/read requests/write"` na criação e na renovação
 renove tokens antigos sem escopos para usar os endpoints. Um token válido sem o
 escopo necessário recebe `403` com Problem Details e desafio Bearer
 `insufficient_scope`; a ausência de autenticação recebe `401`.
-A conversão de identidade para `client_id` continua fora desta etapa.
+A identidade do consumidor segue o contrato de `sub` descrito abaixo.
 
 Sem issuer, JWKS ou chave pública que permita configurar um decoder, a aplicação
 falha na inicialização. Não há fallback que libere acesso sem validação.
+
+## Identidade e proprietário da solicitação
+
+Em todos os perfis, `ConsumerJwtAuthenticationConverter` executa após a validação
+do token pelo decoder e define explicitamente `Authentication.getName()` pelo
+`sub` original do JWT. O valor deve ser uma string não branca de até 100 unidades
+UTF-16, compatível com a factory de domínio. O identificador é preservado
+exatamente, incluindo maiúsculas e espaços; não é normalizado nem truncado.
+
+O conversor inspeciona o tipo original no payload já validado porque Nimbus
+converte `sub` numérico em string durante o decode. Assim, `sub: 123` é rejeitado,
+enquanto `sub: "123"` identifica o consumidor textual `123`. Essa inspeção não
+substitui a validação de assinatura, issuer, finalidade e datas pelo decoder.
+
+`sub` ausente, vazio, branco, não textual ou acima do limite retorna `401` com
+Problem Details seguro e desafio Bearer `invalid_token`, antes de acessar os
+serviços ou o banco. Não há fallback para `client_id`, `consumerId`, `owner` ou
+identidade padrão. A troca de claim exige um contrato explícito com o emissor.
+Os escopos continuam sendo convertidos para authorities com prefixo `SCOPE_`.
+
+Os controllers usam esse nome autenticado na criação, consulta e listagem; os
+serviços aplicam o proprietário nas consultas ao repositório e na factory de
+domínio. Um recurso de outro consumidor retorna `404`. Headers e query params
+não alteram a identidade. O body de criação aceita somente `externalId`,
+`customerId` e `productCode`; tentativas de incluir `consumerId`, `consumer_id`,
+`owner`, `sub` ou `client_id` recebem `400`, sem escrita.
 
 ## Execução local com PEM ou JWKS
 
@@ -92,6 +118,18 @@ O servidor local publica somente o subdiretório `jwks/`, sem expor a chave priv
 ou o header Bearer.
 
 ## Verificação da segurança
+
+Para executar somente os testes unitários de identidade e propriedade:
+
+```bash
+bash ./mvnw -Dtest=JwtConsumerOwnershipUnitTests test
+```
+
+Usam JWTs realmente assinados, a cadeia de filtros, controllers e serviços reais
+em memória, substituindo apenas o repositório. Cobrem identidade inválida nas
+três operações, preservação do proprietário, tentativa de atribuição pelo body,
+isolamento entre consumidores e exigência de escopo. Não iniciam Boot, banco,
+Docker ou rede.
 
 Testes unitários criados para o contrato do Access Token local:
 

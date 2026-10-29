@@ -145,10 +145,12 @@ abaixo. A integração HTTP continua pendente.
 
 `consumer_id` é diferente de `customer_id`: o primeiro identifica o sistema
 consumidor autenticado; o segundo identifica o cliente informado no pedido.
-A derivação de `consumer_id` usa `Principal.getName()`, que no Resource Server
-corresponde ao `sub` do JWT validado. Um eventual mapeamento para `client_id`
-depende do contrato do emissor. Ele não pode ser
-aceito do payload. Os DTOs públicos aceitam apenas `externalId`,
+A derivação de `consumer_id` usa `Principal.getName()`, definido explicitamente
+por `ConsumerJwtAuthenticationConverter` a partir do `sub` original do JWT validado.
+Esse claim deve ser uma string não branca de até 100 unidades UTF-16, sem
+normalização, truncamento ou fallback para `client_id`/outros claims. Identidade
+ausente ou inválida resulta em `401` antes de acessar o banco. O proprietário não
+pode ser aceito do body. Os DTOs públicos aceitam apenas `externalId`,
 `customerId` e `productCode` na criação e expõem apenas `id`, `externalId`,
 `customerId`, `productCode`, `status`, `createdAt` e `updatedAt` nas respostas.
 Nenhuma das oito colunas internas deverá ser exposta na API.
@@ -781,7 +783,9 @@ worker consulta pendências no banco, então reinícios não perdem o processame
 Como o claim usa sua própria transação e só encontra linhas visíveis no banco,
 o trabalho só pode começar depois do commit da criação.
 O proprietário (`consumerId`) vem de `Principal.getName()`, conforme a identidade
-autenticada pelo Spring Security. O corpo não pode definir esse valor.
+autenticada pelo Spring Security e validada pelo conversor de consumidor a partir
+de `sub`. O corpo não pode definir esse valor: `consumerId`, `consumer_id`,
+`owner`, `sub` ou `client_id` no JSON resultam em `400`, sem inserção.
 
 Após o commit, a API responde `201 Created`, com
 `Location: /api/v1/requests/{id}` e os sete campos de `ActivationRequestResponse`.
@@ -1257,7 +1261,12 @@ As demais rotas exigem autenticação, incluindo Actuator sensível e Prometheus
 Swagger/OpenAPI e health/probes preservam o acesso público existente.
 No perfil `local`, o contrato de demonstração exige assinatura RS256, `iss`,
 `exp`, audience da API e `token_use=access`; valida `nbf` quando presente,
-tanto com PEM quanto com JWKS. A identidade do consumidor continua em `sub`.
+tanto com PEM quanto com JWKS. Em todos os perfis, a identidade do consumidor vem
+exclusivamente do `sub` original do token validado: string não branca de até 100
+unidades UTF-16. Um `sub` numérico não é convertido em identidade textual.
+Ausência ou formato inválido resulta em `401` com `invalid_token`, antes do MVC e
+de qualquer consulta ou escrita no banco. Headers, query params e outros claims
+não substituem o proprietário; campos de proprietário no body são rejeitados.
 O POST `/api/v1/requests` exige `SCOPE_requests/write`; os GETs de listagem e de
 consulta por ID exigem `SCOPE_requests/read`. O Spring converte os escopos do
 JWT em authorities com o prefixo `SCOPE_`: por exemplo,
