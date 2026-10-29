@@ -451,6 +451,14 @@ válido é preservado, mesmo acima do teto de backoff. Overflow na representaç�
 do prazo produz `Indeterminate(PROVIDER_RETRY_AFTER_OUT_OF_RANGE)`.
 O agendamento e a persistência desses resultados continuam a cargo da aplicação.
 
+Para HTTP `400`, o worker encaminha `PermanentFailure` ao
+`ActivationRequestOutcomeService.recordPermanentFailure`: a solicitação termina
+em `FAILED` na tentativa atual, inclusive após falhas transitórias anteriores.
+O banco armazena somente `PROVIDER_REJECTED` em `last_error_code`, remove o
+agendamento e libera a posse, sem exigir reconciliação. O corpo da resposta e
+`Retry-After` são ignorados; a justificativa permanece interna, ausente dos DTOs
+públicos. A gravação exige posse, versão e lease válidos, como os demais resultados.
+
 ## Contratos de entrada e saída
 
 `dto.request.CreateActivationRequest` é um record com os campos `externalId`,
@@ -1143,6 +1151,12 @@ commit independente e continuidade de outras pendências. Usa PostgreSQL real,
 sem `sleep`. `ActivationRetryPolicyTests` verifica crescimento, teto, jitter e
 configurações inválidas; `ActivationRequestOutcomeServiceTests` cobre validação
 dos códigos de erro e contagens de linhas sem confirmação de gravação.
+
+`ActivationRequestProviderRejectionTests` cobre HTTP `400` com WireMock, worker,
+serviços transacionais e PostgreSQL reais. Os cenários exigem `FAILED` na primeira,
+segunda e terceira tentativas, `PROVIDER_REJECTED` sem dados sensíveis, ausência de
+agendamento mesmo com `Retry-After` e nenhuma nova chamada por outro worker.
+A consulta pública deve mostrar `FAILED` sem expor a justificativa interna.
 
 Também é possível executar a aplicação com o PostgreSQL do Testcontainers e o
 perfil `test` por meio de `TestAtivaflowApiApplication`:

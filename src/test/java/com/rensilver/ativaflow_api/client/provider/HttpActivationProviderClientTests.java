@@ -86,6 +86,15 @@ class HttpActivationProviderClientTests {
 	}
 
 	@ParameterizedTest
+	@ValueSource(strings = {"120", "invalid", "9999999999999999999999999999999999999999"})
+	void badRequestRemainsPermanentRegardlessOfRetryAfter(String retryAfter, WireMockRuntimeInfo wireMock) {
+		stubFor(post(PATH).willReturn(aResponse().withStatus(400)
+				.withHeader("Retry-After", retryAfter)
+				.withBody("{\"detail\":\"customer data and provider credentials\"}")));
+		assertOutcome(wireMock, new ProviderOutcome.PermanentFailure("PROVIDER_REJECTED"));
+	}
+
+	@ParameterizedTest
 	@ValueSource(ints = {500, 429, 503})
 	void mapsSafeFailuresUnderTheSimulatedContractWithoutRetrying(int status, WireMockRuntimeInfo wireMock) {
 		stubFor(post(PATH).willReturn(aResponse().withStatus(status)));

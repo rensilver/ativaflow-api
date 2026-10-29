@@ -39,6 +39,7 @@ public class HttpActivationProviderClient implements ActivationProviderClient {
 							return new ProviderOutcome.Success();
 						}
 						return switch (response.getStatusCode().value()) {
+							// Rejeição contratual definitiva: código interno fixo, sem corpo ou Retry-After.
 							case 400 -> new ProviderOutcome.PermanentFailure("PROVIDER_REJECTED");
 							// A garantia de não ativação pertence ao contrato simulado, não ao status HTTP.
 							case 429, 500, 503 -> safeTransientFailure(response.getHeaders().getFirst(HttpHeaders.RETRY_AFTER));
