@@ -327,9 +327,42 @@ consumidor, a inserção falha e a API responde o mesmo `409` genérico, sem dad
 do banco ou do registro alheio. Esse `409` informa que o identificador não está
 disponível, mas não identifica o proprietário nem confirma cliente, produto ou status.
 
+### Por que consulta prévia ou `synchronized` não substituem unicidade no banco
+
 A consulta prévia evita inserções desnecessárias para o mesmo consumidor, mas
-não garante unicidade entre chamadas simultâneas. A inserção usa uma transação
-própria: se perder a disputa pela constraint `uk_activation_requests_external_id`, termina com
+o resultado descreve apenas o que estava visível naquele momento. Ela não reserva
+o `externalId`: outra transação pode inserir o mesmo valor antes do `save`.
+Essa janela entre verificar e gravar permite uma condição de corrida:
+
+| Passo | Requisição A | Requisição B |
+| --- | --- | --- |
+| 1 | Consulta `EXT-12345`: não encontra. | — |
+| 2 | — | Consulta `EXT-12345`: também não encontra. |
+| 3 | Insere `EXT-12345`, ainda sem commit. | — |
+| 4 | — | Tenta inserir o mesmo `externalId`. |
+
+Sem a constraint, ambas poderiam confirmar linhas com UUIDs diferentes e o mesmo
+`externalId`. Com `UNIQUE (external_id)`, o PostgreSQL faz B aguardar o desfecho
+da inserção de A: se A confirmar, B recebe uma violação de unicidade
+(SQLSTATE `23505`); se A fizer rollback, B pode prosseguir. Colocar consulta e
+inserção em um método `@Transactional`, por si só, não elimina essa corrida.
+
+O `synchronized` coordena apenas threads que adquirem o mesmo monitor na mesma
+JVM. Um método de instância sincronizado usa o monitor daquele objeto; mesmo um
+método `static synchronized` só coordena chamadas na mesma JVM. Duas réplicas
+da API, em processos ou contêineres distintos, têm monitores independentes e
+podem executar a sequência acima simultaneamente. Escritas por outros serviços,
+scripts ou SQL direto também não passam por esse monitor.
+
+Por isso, a garantia é a constraint `uk_activation_requests_external_id`, criada
+pelo Flyway na V1 e aplicada a todas as escritas na tabela, independentemente
+da instância ou do consumidor. A consulta prévia é uma otimização; a decisão
+final de aceitar a inserção pertence ao banco. O `@Version` protege atualizações
+concorrentes da mesma linha, mas não impede duas inserções com UUIDs distintos
+e o mesmo `externalId`.
+
+A inserção usa uma transação própria: se perder a disputa pela constraint
+`uk_activation_requests_external_id`, termina com
 rollback antes da releitura do registro confirmado. Essa releitura usa
 `REQUIRES_NEW` e `readOnly = true`, sem aderir a uma transação chamadora invalidada.
 Aplicam-se então as mesmas regras de `200` ou `409`. Se a releitura não encontrar
