@@ -562,6 +562,14 @@ real, sem transação de teste, para verificar commit, `PENDING`, proprietário
 autenticado, auditoria, `201`, `Location` e os sete campos públicos. Também verifica
 `400` sem inserção para campos inválidos/controlados pelo servidor, além de
 preservação da autenticação e da proteção CSRF.
+Os contratos HTTP também cobrem campos obrigatórios ausentes, corpo vazio ou
+JSON inválido, rejeição de propriedades desconhecidas e de todos os metadados
+controlados pelo servidor, inclusive timestamps válidos enviados pelo cliente.
+Os limites de 100 unidades UTF-16 são exercitados pela API com texto ASCII,
+espaços nas extremidades e caracteres suplementares, verificando os valores
+após persistência e consulta. A URI de `Location` é consultada após o `POST`, e
+os corpos da criação, consulta e listagem devem preservar os mesmos campos e
+timestamps UTC com precisão de microssegundos.
 Dois cenários adicionais protegem o contrato de criação: WireMock configurado
 com atraso e `503` recebe zero chamadas durante o `POST`; um advice exclusivo
 do teste simula o worker via SQL após o commit e antes da serialização,
@@ -575,6 +583,14 @@ status, parâmetros inválidos, páginas vazias e isolamento de conteúdo e tota
 entre consumidores. Também verifica os sete campos públicos e a ordenação
 `createdAt DESC, id DESC`, inclusive empates de data em páginas distintas, e a
 rejeição de paginação inválida em chamadas diretas ao serviço.
+Os testes incluem última página parcial com arredondamento de `totalPages`,
+parâmetros opcionais vazios, filtro de cliente no limite de tamanho e rejeição
+de filtros compostos somente por espaços Unicode. O parâmetro `sort` não pode
+alterar a ordem fixa. Os erros de parâmetros e de UUID verificam o contrato de
+Problem Details, incluindo o caminho da requisição. `GetActivationRequestEndpointTests`
+também verifica a consulta nos quatro estados e a conversão para UTC de datas
+persistidas com outro offset, preservando microssegundos e a diferença entre
+criação e atualização.
 `ActivationRequestQueryTests` captura o SQL real das quatro combinações de
 filtros e verifica o escopo de consumidor no conteúdo e na contagem, predicados
 apenas para filtros presentes e paginação/ordenação no banco.

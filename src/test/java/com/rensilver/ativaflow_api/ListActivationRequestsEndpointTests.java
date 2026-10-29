@@ -10,6 +10,7 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.CsvSource;
 import org.junit.jupiter.params.provider.EnumSource;
+import org.junit.jupiter.params.provider.ValueSource;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.autoconfigure.web.servlet.AutoConfigureMockMvc;
 import org.springframework.boot.test.context.SpringBootTest;
@@ -109,6 +110,84 @@ class ListActivationRequestsEndpointTests {
 		}
 	}
 
+	@Test
+	void returnsPartialLastPageWithRoundedUpTotalPages() throws Exception {
+		insertRequest(LOW_ID, CONSUMER, "CUSTOMER-1", ActivationStatus.PENDING, CREATED_AT);
+		insertRequest(HIGH_ID, CONSUMER, "CUSTOMER-1", ActivationStatus.PENDING, CREATED_AT);
+		insertRequest(OLD_ID, CONSUMER, "CUSTOMER-1", ActivationStatus.PENDING, "2026-10-27T15:00:00Z");
+		insertRequest(UUID.randomUUID().toString(), "other-consumer", "CUSTOMER-1", ActivationStatus.PENDING, CREATED_AT);
+		insertRequest(UUID.randomUUID().toString(), CONSUMER, "CUSTOMER-2", ActivationStatus.PENDING, CREATED_AT);
+		insertRequest(UUID.randomUUID().toString(), CONSUMER, "CUSTOMER-1", ActivationStatus.FAILED, CREATED_AT);
+
+		mockMvc.perform(get("/api/v1/requests").with(user(CONSUMER))
+				.param("status", "PENDING").param("customerId", "CUSTOMER-1").param("size", "2"))
+				.andExpect(status().isOk())
+				.andExpect(jsonPath("$.page").value(0))
+				.andExpect(jsonPath("$.size").value(2))
+				.andExpect(jsonPath("$.totalElements").value(3))
+				.andExpect(jsonPath("$.totalPages").value(2))
+				.andExpect(jsonPath("$.content.length()").value(2))
+				.andExpect(jsonPath("$.content[0].id").value(HIGH_ID))
+				.andExpect(jsonPath("$.content[1].id").value(LOW_ID));
+
+		mockMvc.perform(get("/api/v1/requests").with(user(CONSUMER))
+				.param("status", "PENDING").param("customerId", "CUSTOMER-1")
+				.param("page", "1").param("size", "2"))
+				.andExpect(status().isOk())
+				.andExpect(jsonPath("$.page").value(1))
+				.andExpect(jsonPath("$.size").value(2))
+				.andExpect(jsonPath("$.totalElements").value(3))
+				.andExpect(jsonPath("$.totalPages").value(2))
+				.andExpect(jsonPath("$.content.length()").value(1))
+				.andExpect(jsonPath("$.content[0].id").value(OLD_ID));
+	}
+
+	@ParameterizedTest
+	@ValueSource(strings = {"page", "size", "status"})
+	void treatsEmptyOptionalParametersAsDefaults(String parameter) throws Exception {
+		insertRequest(LOW_ID, CONSUMER, "CUSTOMER-1", ActivationStatus.PENDING, CREATED_AT);
+		insertRequest(HIGH_ID, CONSUMER, "CUSTOMER-2", ActivationStatus.FAILED, CREATED_AT);
+
+		mockMvc.perform(get("/api/v1/requests").with(user(CONSUMER)).param(parameter, ""))
+				.andExpect(status().isOk())
+				.andExpect(jsonPath("$.page").value(0))
+				.andExpect(jsonPath("$.size").value(20))
+				.andExpect(jsonPath("$.totalElements").value(2))
+				.andExpect(jsonPath("$.totalPages").value(1))
+				.andExpect(jsonPath("$.content.length()").value(2))
+				.andExpect(jsonPath("$.content[0].id").value(HIGH_ID))
+				.andExpect(jsonPath("$.content[1].id").value(LOW_ID));
+	}
+
+	@Test
+	void keepsFixedOrderingWhenClientSuppliesSort() throws Exception {
+		insertRequest(LOW_ID, CONSUMER, "CUSTOMER-1", ActivationStatus.PENDING, CREATED_AT);
+		insertRequest(HIGH_ID, CONSUMER, "CUSTOMER-1", ActivationStatus.PENDING, CREATED_AT);
+		insertRequest(OLD_ID, CONSUMER, "CUSTOMER-1", ActivationStatus.PENDING, "2026-10-27T15:00:00Z");
+
+		mockMvc.perform(get("/api/v1/requests").with(user(CONSUMER)).param("sort", "createdAt,asc", "id,asc"))
+				.andExpect(status().isOk())
+				.andExpect(jsonPath("$.content.length()").value(3))
+				.andExpect(jsonPath("$.content[0].id").value(HIGH_ID))
+				.andExpect(jsonPath("$.content[1].id").value(LOW_ID))
+				.andExpect(jsonPath("$.content[2].id").value(OLD_ID));
+	}
+
+	@Test
+	void acceptsCustomerFilterAtStorageLimit() throws Exception {
+		String customerId = "a".repeat(100);
+		insertRequest(LOW_ID, CONSUMER, customerId, ActivationStatus.PENDING, CREATED_AT);
+		insertRequest(HIGH_ID, CONSUMER, "a".repeat(99), ActivationStatus.PENDING, CREATED_AT);
+		insertRequest(OLD_ID, "other-consumer", customerId, ActivationStatus.PENDING, CREATED_AT);
+
+		mockMvc.perform(get("/api/v1/requests").with(user(CONSUMER)).param("customerId", customerId))
+				.andExpect(status().isOk())
+				.andExpect(jsonPath("$.totalElements").value(1))
+				.andExpect(jsonPath("$.content.length()").value(1))
+				.andExpect(jsonPath("$.content[0].id").value(LOW_ID))
+				.andExpect(jsonPath("$.content[0].customerId").value(customerId));
+	}
+
 	@ParameterizedTest
 	@EnumSource(ActivationStatus.class)
 	void filtersByEachStatus(ActivationStatus filteredStatus) throws Exception {
@@ -157,9 +236,16 @@ class ListActivationRequestsEndpointTests {
 
 	@Test
 	void acceptsMaximumPageSize() throws Exception {
+		for (int index = 1; index <= 101; index++) {
+			insertRequest(new UUID(0, index).toString(), CONSUMER, "CUSTOMER-1", ActivationStatus.PENDING, CREATED_AT);
+		}
+
 		mockMvc.perform(get("/api/v1/requests").with(user(CONSUMER)).param("size", "100"))
 				.andExpect(status().isOk())
-				.andExpect(jsonPath("$.size").value(100));
+				.andExpect(jsonPath("$.size").value(100))
+				.andExpect(jsonPath("$.content.length()").value(100))
+				.andExpect(jsonPath("$.totalElements").value(101))
+				.andExpect(jsonPath("$.totalPages").value(2));
 	}
 
 	@ParameterizedTest
@@ -167,6 +253,19 @@ class ListActivationRequestsEndpointTests {
 			"size, abc", "status, UNKNOWN", "status, pending", "customerId, ' '", "customerId, ''"})
 	void rejectsInvalidParameters(String parameter, String value) throws Exception {
 		mockMvc.perform(get("/api/v1/requests").with(user(CONSUMER)).param(parameter, value))
+				.andExpect(status().isBadRequest())
+				.andExpect(content().contentTypeCompatibleWith(MediaType.APPLICATION_PROBLEM_JSON))
+				.andExpect(jsonPath("$.type").value("about:blank"))
+				.andExpect(jsonPath("$.title").value("Bad Request"))
+				.andExpect(jsonPath("$.status").value(400))
+				.andExpect(jsonPath("$.detail").isString())
+				.andExpect(jsonPath("$.instance").value("/api/v1/requests"));
+	}
+
+	@ParameterizedTest
+	@ValueSource(strings = {"\u2003", "\t\n"})
+	void rejectsCustomerFilterContainingOnlyWhitespace(String customerId) throws Exception {
+		mockMvc.perform(get("/api/v1/requests").with(user(CONSUMER)).param("customerId", customerId))
 				.andExpect(status().isBadRequest())
 				.andExpect(content().contentTypeCompatibleWith(MediaType.APPLICATION_PROBLEM_JSON))
 				.andExpect(jsonPath("$.status").value(400));

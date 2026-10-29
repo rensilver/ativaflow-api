@@ -40,6 +40,7 @@ import org.springframework.test.context.DynamicPropertySource;
 import org.springframework.test.web.servlet.MockMvc;
 import org.springframework.transaction.support.TransactionSynchronizationManager;
 import org.springframework.web.bind.annotation.ControllerAdvice;
+import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.servlet.mvc.method.annotation.ResponseBodyAdvice;
 
 import static com.github.tomakehurst.wiremock.client.WireMock.anyRequestedFor;
@@ -51,6 +52,7 @@ import static com.github.tomakehurst.wiremock.core.WireMockConfiguration.wireMoc
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.springframework.security.test.web.servlet.request.SecurityMockMvcRequestPostProcessors.csrf;
 import static org.springframework.security.test.web.servlet.request.SecurityMockMvcRequestPostProcessors.user;
+import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.content;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
@@ -126,6 +128,20 @@ class CreateActivationRequestEndpointTests {
 			assertThat(rs.getInt("attempt_count")).isZero();
 			return id;
 		}, id);
+
+		// A URI publicada deve permitir ler o registro confirmado em outra transação.
+		var fetched = mockMvc.perform(get(result.getResponse().getHeader("Location")).with(user(CONSUMER)))
+				.andExpect(status().isOk())
+				.andExpect(content().contentTypeCompatibleWith(MediaType.APPLICATION_JSON))
+				.andReturn().getResponse().getContentAsString();
+		assertThat(objectMapper.readTree(fetched)).isEqualTo(body);
+
+		var listed = mockMvc.perform(get(PATH).with(user(CONSUMER)))
+				.andExpect(status().isOk())
+				.andExpect(jsonPath("$.totalElements").value(1))
+				.andExpect(jsonPath("$.content.length()").value(1))
+				.andReturn().getResponse().getContentAsString();
+		assertThat(objectMapper.readTree(listed).get("content").get(0)).isEqualTo(body);
 	}
 
 	@Test
@@ -183,15 +199,73 @@ class CreateActivationRequestEndpointTests {
 
 	static Stream<Arguments> invalidFields() {
 		return Stream.of("externalId", "customerId", "productCode")
-				.flatMap(field -> Stream.of(null, "", " \t\n", "\u2003", "a".repeat(101))
+				.flatMap(field -> Stream.of(null, "", " \t\n", "\u2003", "a".repeat(101), "😀".repeat(51))
 						.map(value -> Arguments.of(field, value)));
 	}
 
 	@ParameterizedTest
-	@ValueSource(strings = {"id", "status", "consumerId", "createdAt", "version"})
-	void rejectsServerControlledFieldsWithoutPersisting(String field) throws Exception {
+	@MethodSource("validBoundaryFields")
+	void acceptsAndPreservesFieldsAtStorageLimit(String field, String value) throws Exception {
 		var payload = (ObjectNode) objectMapper.readTree(PAYLOAD);
-		payload.put(field, "forged");
+		payload.put(field, value);
+
+		var response = mockMvc.perform(post(PATH).with(user(CONSUMER)).with(csrf())
+				.contentType(MediaType.APPLICATION_JSON).content(objectMapper.writeValueAsString(payload)))
+				.andExpect(status().isCreated())
+				.andExpect(jsonPath("$." + field).value(value))
+				.andExpect(jsonPath("$.status").value("PENDING"))
+				.andReturn().getResponse().getContentAsString();
+
+		UUID id = UUID.fromString(objectMapper.readTree(response).get("id").asText());
+		assertThat(storedRequestCount()).isEqualTo(1);
+		// A releitura também protege contra normalização ou truncamento na persistência.
+		mockMvc.perform(get(PATH + "/" + id).with(user(CONSUMER)))
+				.andExpect(status().isOk())
+				.andExpect(jsonPath("$." + field).value(value));
+	}
+
+	static Stream<Arguments> validBoundaryFields() {
+		return Stream.of("externalId", "customerId", "productCode")
+				.flatMap(field -> Stream.of("a".repeat(100), " " + "a".repeat(98) + " ", "😀".repeat(50))
+						.map(value -> Arguments.of(field, value)));
+	}
+
+	@ParameterizedTest
+	@ValueSource(strings = {"externalId", "customerId", "productCode"})
+	void rejectsMissingRequiredFieldWithoutPersisting(String field) throws Exception {
+		var payload = (ObjectNode) objectMapper.readTree(PAYLOAD);
+		payload.remove(field);
+
+		mockMvc.perform(post(PATH).with(user(CONSUMER)).with(csrf())
+				.contentType(MediaType.APPLICATION_JSON).content(objectMapper.writeValueAsString(payload)))
+				.andExpect(status().isBadRequest());
+		assertThat(storedRequestCount()).isZero();
+	}
+
+	@ParameterizedTest
+	@ValueSource(strings = {"", " ", "{", "null", "[]", "{}", "{\"externalId\":}"})
+	void rejectsMissingOrInvalidJsonBodyWithoutPersisting(String payload) throws Exception {
+		mockMvc.perform(post(PATH).with(user(CONSUMER)).with(csrf())
+				.contentType(MediaType.APPLICATION_JSON).content(payload))
+				.andExpect(status().isBadRequest());
+		assertThat(storedRequestCount()).isZero();
+	}
+
+	@ParameterizedTest
+	@ValueSource(strings = {"id", "status", "consumerId", "owner", "createdAt", "updatedAt", "version",
+			"attemptCount", "nextAttemptAt", "leaseUntil", "claimedBy", "lastErrorCode",
+			"reconciliationRequired", "unexpectedField"})
+	void rejectsUnknownAndServerControlledFieldsWithoutPersisting(String field) throws Exception {
+		var payload = (ObjectNode) objectMapper.readTree(PAYLOAD);
+		switch (field) {
+			case "id" -> payload.put(field, UUID.randomUUID().toString());
+			case "status" -> payload.put(field, "COMPLETED");
+			case "version", "attemptCount" -> payload.put(field, 5);
+			case "reconciliationRequired" -> payload.put(field, true);
+			case "createdAt", "updatedAt", "nextAttemptAt", "leaseUntil" ->
+					payload.put(field, "2026-10-27T15:00:00Z");
+			default -> payload.put(field, "forged");
+		}
 		mockMvc.perform(post(PATH).with(user(CONSUMER)).with(csrf())
 				.contentType(MediaType.APPLICATION_JSON).content(objectMapper.writeValueAsString(payload)))
 				.andExpect(status().isBadRequest());
@@ -233,7 +307,7 @@ class CreateActivationRequestEndpointTests {
 
 		@Override
 		public boolean supports(MethodParameter returnType, Class<? extends HttpMessageConverter<?>> converterType) {
-			return true;
+			return returnType.hasMethodAnnotation(PostMapping.class);
 		}
 
 		@Override

@@ -44,7 +44,7 @@ class GetActivationRequestEndpointTests {
 		jdbcTemplate.update("""
 				UPDATE activation_requests SET status = ?, updated_at = ?, version = version + 1
 				WHERE id = ?
-				""", currentStatus.name(), OffsetDateTime.parse("2026-10-28T12:01:00-03:00"), id);
+				""", currentStatus.name(), OffsetDateTime.parse("2026-10-28T12:01:00.654321-03:00"), id);
 
 		mockMvc.perform(get("/api/v1/requests/{id}", id).with(user(CONSUMER)))
 				.andExpect(status().isOk())
@@ -55,8 +55,8 @@ class GetActivationRequestEndpointTests {
 				.andExpect(jsonPath("$.customerId").value("CUSTOMER-1"))
 				.andExpect(jsonPath("$.productCode").value("PRODUCT-1"))
 				.andExpect(jsonPath("$.status").value(currentStatus.name()))
-				.andExpect(jsonPath("$.createdAt").value("2026-10-28T15:00:00Z"))
-				.andExpect(jsonPath("$.updatedAt").value("2026-10-28T15:01:00Z"));
+				.andExpect(jsonPath("$.createdAt").value("2026-10-28T15:00:00.123456Z"))
+				.andExpect(jsonPath("$.updatedAt").value("2026-10-28T15:01:00.654321Z"));
 	}
 
 	@Test
@@ -94,7 +94,13 @@ class GetActivationRequestEndpointTests {
 	@Test
 	void rejectsMalformedUuid() throws Exception {
 		mockMvc.perform(get("/api/v1/requests/not-a-uuid").with(user(CONSUMER)))
-				.andExpect(status().isBadRequest());
+				.andExpect(status().isBadRequest())
+				.andExpect(content().contentTypeCompatibleWith(MediaType.APPLICATION_PROBLEM_JSON))
+				.andExpect(jsonPath("$.type").value("about:blank"))
+				.andExpect(jsonPath("$.title").value("Bad Request"))
+				.andExpect(jsonPath("$.status").value(400))
+				.andExpect(jsonPath("$.detail").isString())
+				.andExpect(jsonPath("$.instance").value("/api/v1/requests/not-a-uuid"));
 	}
 
 	private UUID insertRequest(String consumerId) {
@@ -107,8 +113,8 @@ class GetActivationRequestEndpointTests {
 				VALUES (?, ?, 'CUSTOMER-1', 'PRODUCT-1', ?, 'PENDING', 0,
 				        2, 'worker-1', 'PROVIDER_TIMEOUT', true, ?, ?)
 				""", id, "EXT-" + id, consumerId,
-				OffsetDateTime.parse("2026-10-28T12:00:00-03:00"),
-				OffsetDateTime.parse("2026-10-28T12:00:00-03:00"));
+				OffsetDateTime.parse("2026-10-28T12:00:00.123456-03:00"),
+				OffsetDateTime.parse("2026-10-28T12:00:00.123456-03:00"));
 		return id;
 	}
 }
