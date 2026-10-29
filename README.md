@@ -69,7 +69,7 @@ de serviços está em [Responsabilidades dos serviços](docs/service-responsibil
 | `src/main/resources/application-prod.yaml` | Configuração por variáveis de ambiente e desativação do DevTools em produção. |
 | `src/test/resources/application-test.yaml` | Configuração do provedor para o perfil de testes. |
 | `.env.example` | Modelo de variáveis para execução local. |
-| `docker-compose.yaml` | Provedor simulado local com a imagem oficial do WireMock. |
+| `docker-compose.yaml` | API, PostgreSQL com volume persistente e provedor simulado WireMock. |
 | `infra/wiremock/mappings/activation-success.json` | Mapping estático de sucesso: `POST /provider/v1/activate` retorna `204`, sem corpo. |
 | `.github/workflows/ci.yaml` | Build e testes no GitHub Actions. |
 | `.gitignore` | Exclusões de build, arquivos de IDE e configurações locais de ambiente. |
@@ -1189,9 +1189,18 @@ JWT e shutdown gracioso. Para construir a imagem a partir dos fontes:
 docker build -t ativaflow-api:local .
 ```
 
+### Ambiente completo no Compose
+
+O Compose inicia a API, PostgreSQL 17 e WireMock, com healthchecks e espera pelas
+dependências. Prepare a senha e a chave pública conforme o
+[guia do Compose](docs/container-image.md#ambiente-completo-com-docker-compose)
+e execute `docker compose up --build -d --wait`. Banco e provedor usam URLs
+internas; API e mock publicam portas apenas em loopback. O banco não publica porta.
+
 ### Provedor simulado no Compose
 
-Com Docker Engine e Docker Compose disponíveis, execute na raiz do repositório:
+Com Docker Engine, Docker Compose e `DB_PASSWORD` preenchido no `.env`, execute
+na raiz do repositório para iniciar somente o mock:
 
 ```bash
 docker compose up -d activation-provider-mock
@@ -1207,8 +1216,8 @@ ao mock e à sua API administrativa.
 Para a API executada na máquina com o perfil `local`, mantenha
 `ACTIVATION_PROVIDER_BASE_URL=http://localhost:8081`, como em `.env.example`.
 Outros containers na mesma rede do Compose devem usar
-`http://activation-provider-mock:8080`. Nesta etapa, o Compose contém apenas o
-mock; a aplicação e o PostgreSQL continuam com a execução local descrita acima.
+`http://activation-provider-mock:8080`. A API no Compose já usa esse endereço,
+enquanto a execução na máquina continua usando `localhost:8081`.
 
 Após a inicialização do WireMock, confira diretamente o contrato simulado:
 
@@ -1222,7 +1231,7 @@ O retorno esperado é `204 No Content`, sem corpo. O único mapping padrão é
 `infra/wiremock/mappings/activation-success.json`; não há seletor de cenários na
 API. Erros e timeouts são configurados pelo próprio WireMock dos testes, em
 instâncias isoladas com portas dinâmicas, sem depender deste container.
-O worker ainda está pendente; criar uma solicitação na API não chama o mock.
+Com a API iniciada, o worker processa as solicitações persistidas e chama o mock.
 
 Após editar um mapping, reinicie o serviço para recarregá-lo. Para consultar
 logs ou encerrar o ambiente:

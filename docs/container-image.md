@@ -117,8 +117,75 @@ unset JWT_DEMO_DIR JWT_PUBLIC_VOLUME
 ```
 
 Os logs devem registrar a conclusão do shutdown gracioso, sem `OOMKilled` ou
-SIGKILL (código 137). O Compose atual fornece somente o mock; a inclusão da API e
-do PostgreSQL no Compose permanece uma tarefa separada de A01.
+SIGKILL (código 137).
+
+## Ambiente completo com Docker Compose
+
+O Compose usa o mesmo Dockerfile e inicia `app`, `postgres` e
+`activation-provider-mock`. Na raiz do projeto, copie `.env.example` para `.env`
+se ainda não existir e preencha `DB_PASSWORD` com uma senha não vazia.
+O Compose lê `.env` automaticamente; não é necessário carregá-lo no shell.
+Gere o material JWT com JDK 21 e prepare somente a chave pública para a API:
+
+```bash
+export JWT_DEMO_DIR="$(java scripts/LocalJwt.java create)"
+source "$JWT_DEMO_DIR/env.sh"
+export JWT_PUBLIC_KEY_FILE="$PWD/.env.jwt-public.pem"
+cp -- "$JWT_DEMO_DIR/public.pem" "$JWT_PUBLIC_KEY_FILE"
+chmod 0444 "$JWT_PUBLIC_KEY_FILE"
+docker compose config --quiet
+docker compose up --build -d --wait
+docker compose ps
+curl --fail http://localhost:8080/actuator/health
+```
+
+O nome `.env.jwt-public.pem` já é ignorado pelo Git e pelo contexto de build.
+Essa cópia contém apenas a chave pública, legível pelo UID `10001`; chave privada
+e token permanecem no diretório temporário privado. O Compose monta somente esse
+arquivo em `/run/secrets/jwt-public.pem`, como somente leitura. Não é necessário
+dar acesso ao diretório privado gerado pelo utilitário. O arquivo precisa estar
+em um caminho acessível ao daemon Docker; o caminho no projeto também evita o
+isolamento de `/tmp` de instalações via Snap. Docker remoto requer disponibilizar
+o arquivo no host do daemon.
+
+Este Compose é para demonstração local com PEM: fixa `SPRING_PROFILES_ACTIVE=local`,
+issuer padrão `https://ativaflow.local` e audience `ativaflow-api`, compatíveis com
+o utilitário. Issuer e audience podem ser ajustados pelas respectivas variáveis.
+O caminho PEM no host vem de `JWT_PUBLIC_KEY_FILE` (padrão `.env.jwt-public.pem`);
+o `PUBLICKEYLOCATION` do roteiro para execução na máquina não é usado no container.
+As variáveis do Compose são as referenciadas no YAML; ele não encaminha todo o
+`.env` para a API.
+
+| Serviço | Endereço na rede Compose | Publicação no host |
+| --- | --- | --- |
+| API | `app:8080` | `127.0.0.1:${SERVER_PORT:-8080}` |
+| PostgreSQL | `postgres:5432`, banco `ativaflow` | Nenhuma |
+| WireMock | `activation-provider-mock:8080` | `127.0.0.1:8081` |
+
+`DB_URL` e `ACTIVATION_PROVIDER_BASE_URL` da execução na máquina são substituídas
+pelas URLs internas no Compose. `DB_USERNAME` (padrão `ativaflow`) e `DB_PASSWORD`
+são compartilhados pelo banco e pela API. `SERVER_PORT` altera apenas a porta
+publicada; a API continua escutando em `8080` dentro do container. Ajuste a URL do
+curl se mudar essa variável. A API tem limite de memória de 512 MiB.
+
+A API aguarda os healthchecks do PostgreSQL (`pg_isready` via TCP) e do WireMock
+(`/__admin/health`). Seu próprio check consulta `/actuator/health`, que inclui a
+conexão com o banco, usando o curl já presente na imagem. O check da API não chama
+o provedor. A espera de inicialização usa `depends_on: condition: service_healthy`,
+conforme a [referência do Compose](https://docs.docker.com/reference/compose-file/services/).
+
+O volume nomeado `postgres-data` preserva os dados entre recriações. Para parar
+os serviços mantendo os dados, execute `docker compose down`, sem `--volumes`.
+A API recebe até 40 segundos para encerrar, acima do timeout padrão de 30 segundos
+da aplicação. Para subir novamente, mantenha `.env` e a chave pública disponíveis
+e execute `docker compose up -d --wait`. Alterar a senha no `.env` não altera a
+senha de um banco já inicializado no volume; mantenha as credenciais coerentes.
+
+Depois de encerrar o ambiente, remova a cópia pública com
+`rm -- "$JWT_PUBLIC_KEY_FILE"` e limpe o material temporário conforme o
+[roteiro JWT](local-jwt.md#encerrar-e-remover-material).
+A demonstração autenticada completa e a validação de retomada de pendências
+continuam no próximo item de A01.
 
 ## Evidência de validação — 29/10/2026
 
@@ -139,5 +206,22 @@ Validação local em Linux/amd64 da imagem `ativaflow-api:local`:
 Neste ambiente, o Docker via Snap recusou a execução tanto de `java` quanto de
 `sh` com `--security-opt no-new-privileges=true` (`operation not permitted`).
 O roteiro e a validação acima usam as demais restrições descritas na tabela.
-A validação de restart e preservação dos dados pertence ao roteiro completo
-com Compose, ainda pendente em A01.
+A validação de retomada de pendências pertence ao roteiro completo com Compose,
+ainda pendente em A01.
+
+## Evidência de validação do Compose — 29/10/2026
+
+Validação em projeto Compose isolado, com portas dinâmicas em loopback para
+evitar conflitos com serviços existentes:
+
+| Verificação | Resultado |
+| --- | --- |
+| Configuração | `docker compose config --quiet` passou; senha ausente/vazia rejeitada; usuário compartilhado, porta externa customizada e URLs internas conferidos. |
+| Build e inicialização | `docker compose up --build -d --wait`: três serviços `healthy`; API como `10001:10001` e montagem pública somente leitura. |
+| Fluxo | Health 200 `UP`, GET sem token 401, POST autenticado 201 e GET posterior `COMPLETED`; chamada registrada no WireMock. |
+| Volume | Registro preservado após `down` sem remoção do volume e nova subida dos três serviços. |
+| Suíte | `./mvnw -B --no-transfer-progress clean verify`: 949 testes em 58 relatórios; 0 falhas, erros ou ignorados. |
+| Limpeza | Removidos somente containers, rede, volume e material JWT do projeto de teste. |
+
+Esse smoke test comprova persistência de um registro concluído. A validação de
+retomada de trabalho ainda pendente após restart continua no próximo item de A01.
