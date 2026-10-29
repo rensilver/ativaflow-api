@@ -203,7 +203,8 @@ bloqueadas, preservação dos dados e commit independente em PostgreSQL real.
 indeterminado nas três tentativas, ausência de novo claim/preparação, repetição
 da escrita sem efeito, continuidade de outras pendências, commit independente
 e rejeição de versão/worker incorretos, lease ausente/vencido (inclusive no limite),
-estados incompatíveis e resposta tardia após recuperação. Usa PostgreSQL real.
+estados incompatíveis e resposta tardia após expiração do lease, preservando
+todos os dados mesmo após executar a recuperação. Usa PostgreSQL real.
 
 `ActivationRequestOutcomeService` grava sucesso, falha permanente e falha
 transitória comprovadamente segura em transações `REQUIRES_NEW`. A atualização
