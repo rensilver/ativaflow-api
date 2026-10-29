@@ -35,10 +35,12 @@ Revisão de `CHECKLIST.md` confrontada com código, testes, configurações, REA
 
 ### A02 — Análise de desempenho no README
 
-- [ ] **[P0] Responder às perguntas do cenário de lentidão.** O conteúdo está previsto na SPEC-06, mas não foi incorporado ao README. Usar API **300 ms → 2,5 s**, consultas **50 ms → 1,2 s**, provedor **400 ms → 3 s**, CPU **45%**, memória **60%**. Explicar investigação inicial, medição separada de aplicação/banco/provedor, logs e métricas úteis e melhorias condicionadas às evidências.
-- [ ] **[P1] Completar hipótese de causa comum e validação pós-correção.** Diferenciar hipótese de diagnóstico confirmado, comparar carga equivalente e prever rollback. Explicar por que o provedor lento, sozinho, não deveria atrasar o POST assíncrono.
+- [x] **[P0] Responder às perguntas do cenário de lentidão.** Incorporadas as seis respostas à seção [Análise de desempenho: cenário de lentidão](README.md#análise-de-desempenho-cenário-de-lentidão), com API **300 ms → 2,5 s**, consultas **50 ms → 1,2 s**, provedor **400 ms → 3 s**, CPU **45%**, memória **60%**. Inclui investigação inicial, medição separada de aplicação/banco/provedor, logs e métricas úteis e melhorias condicionadas às evidências.
+- [x] **[P1] Completar hipótese de causa comum e validação pós-correção.** Documentadas hipóteses verificáveis de contenção compartilhada, distinção entre hipótese e diagnóstico, comparação sob carga equivalente e gatilhos de rollback. A seção explica por que o provedor lento, sozinho, não deveria atrasar o POST assíncrono.
 
 **Aceite:** seis respostas localizáveis no README, sem apresentar CPU/memória como saturadas nem atribuir causa sem evidência.
+
+**Validação documental (29/10/2026):** conferidas as seis respostas contra a SPEC-06, as fronteiras transacionais de criação/worker, os campos dos logs e a configuração atual de observabilidade. Verificação automatizada confirmou numeração, indicadores exatos, tópicos de aceite, link local/âncora e blocos de código balanceados; `git diff --check` sem erros. As recomendações têm referências oficiais do Spring Boot 3.5 e PostgreSQL 17. Alterações somente em Markdown; suíte Maven e testes de carga não executados nesta tarefa, sem alegar reprodução ou correção de incidente.
 
 **Origem:** 06.21–06.28, 07.15. Trata-se de uma única seção, não de tarefas independentes por SPEC.
 

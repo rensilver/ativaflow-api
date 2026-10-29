@@ -1323,6 +1323,136 @@ Access Token local e sua geração/renovação:
 bash ./mvnw -Dtest=LocalAccessTokenValidationUnitTests,LocalAccessTokenMaterialUnitTests test
 ```
 
+## Análise de desempenho: cenário de lentidão
+
+O cenário da [SPEC-06](specs/06-observabilidade-e-producao.md#3-cenário-obrigatório-de-análise-no-readme)
+fornece os seguintes indicadores; eles não são resultados de um teste de carga
+executado neste projeto:
+
+| Indicador | Antes | Depois |
+| --- | --- | --- |
+| Latência da API | 300 ms | 2,5 s |
+| Algumas consultas ao banco | 50 ms | 1,2 s |
+| Latência do provedor externo | 400 ms | 3 s |
+| CPU | — | 45% |
+| Memória | — | 60% |
+
+CPU em 45% e memória em 60% não comprovam saturação desses recursos. Esperas por
+I/O, locks ou conexões podem aumentar a latência sem elevar essas médias; também
+é necessário verificar picos, limites do container e pausas da JVM.
+
+### 1. O que investigar primeiro?
+
+Delimitar o início da regressão e as rotas/instâncias afetadas, comparando tráfego,
+concorrência, volume de dados e mudanças recentes de código, configuração ou
+infraestrutura. Separar POST, consulta por ID e listagem; os valores fornecidos
+não informam rota nem percentil. Medir p50/p95/p99, vazão, erros/timeouts,
+tentativas, quantidade e idade do trabalho pendente e ocupação/espera dos pools.
+Comparar a linha de base com a mesma janela e perfil de carga antes de atribuir
+a causa ao banco ou ao provedor.
+
+### 2. Como separar aplicação, banco e provedor?
+
+Medir por etapa: duração HTTP na API, espera para adquirir conexão Hikari,
+execução SQL/commit no banco e duração HTTP do provedor no worker. O tempo de
+uma operação de repositório inclui mais que execução SQL; comparar essas medidas
+evita tratar espera por conexão como query lenta. No PostgreSQL, usar
+[`pg_stat_statements`](https://www.postgresql.org/docs/17/pgstatstatements.html)
+se habilitado, com deltas da janela do incidente, e examinar o plano das consultas
+afetadas com
+[`EXPLAIN (ANALYZE, BUFFERS)`](https://www.postgresql.org/docs/17/using-explain.html).
+`ANALYZE` executa a instrução: reproduzir em ambiente controlado com dados
+representativos, especialmente para escritas e consultas que adquirem locks.
+
+No código atual, `ActivationRequestService` delega a inserção/commit a
+`ActivationRequestCreationTransaction`; o POST responde sem chamar o provedor.
+`ActivationRequestWorker` faz claim e preparação em transações curtas, chama HTTP
+fora de transação e só depois persiste o resultado. Portanto, os 3 s do provedor
+não deveriam, sozinhos, atrasar o POST; podem atrasar a conclusão assíncrona.
+Confirmar essas fronteiras na versão em execução e investigar contenção em
+recursos compartilhados se a criação também ficar lenta. Não somar latências de
+operações assíncronas como se pertencessem ao mesmo caminho HTTP.
+
+### 3. Quais logs e métricas ajudam?
+
+Os eventos existentes `activation_attempt_started`, `activation_attempt_finished`
+e `activation_provider_attempt` permitem correlacionar execução e resultado por
+`correlationId`; incluem, conforme o evento, `requestId`, `attempt`, `durationMs`,
+`httpStatus`, `responseCategory`, `result` e `persistence`. A correlação vem do
+registro persistido e segue no header `X-Correlation-ID` até o provedor.
+
+Para o diagnóstico, coletar latência e erros por rota/status, conexões Hikari
+ativas/ociosas, espera de aquisição, threads pendentes e timeouts, além de JVM,
+GC e threads. A referência de
+[métricas do Spring Boot 3.5](https://docs.spring.io/spring-boot/3.5/reference/actuator/metrics.html)
+descreve `http.server.requests`, `jdbc.connections` e o prefixo `hikaricp`.
+No banco, examinar locks, transações longas, I/O e `wait_event` em
+[`pg_stat_activity`](https://www.postgresql.org/docs/17/monitoring-stats.html#MONITORING-PG-STAT-ACTIVITY-VIEW).
+Acrescentar duração por etapa, p95/p99 do provedor, erros/timeouts/retries por
+categoria e vazão/idade do backlog para distinguir espera de processamento.
+
+Essas são necessidades de coleta: Prometheus não está exposto na configuração
+atual, métricas de negócio e histogramas/percentis ainda precisam de configuração
+ou instrumentação, e logs JSON/tracing distribuído não estão habilitados.
+Se tracing for adicionado, usar `traceId` e spans de entrada, banco e worker/HTTP
+externo; `correlationId` sozinho não fornece esses tempos. Proteger o acesso
+operacional, usar tags de baixa cardinalidade e manter IDs apenas em logs/traces,
+sem JWT, credenciais ou payloads sensíveis.
+
+### 4. Quais melhorias considerar conforme as evidências?
+
+Se o plano mostrar consultas caras, corrigir predicados/índices e estatísticas,
+incluindo claim e contagem da listagem, medindo o custo de escrita dos índices.
+Se houver locks/transações longas, reduzir sua duração e preservar a separação
+entre HTTP e transações já adotada. Se a espera estiver no pool, dimensionar
+conexões e concorrência pelo orçamento do PostgreSQL e pela quantidade de
+instâncias; aumentar o pool indiscriminadamente pode agravar a contenção.
+Se chegarem mais solicitações do que o worker consegue concluir, limitar a
+concorrência e planejar backpressure/admissão para conter o backlog, validando a
+capacidade do banco e do provedor antes de aumentar workers.
+
+Calibrar timeouts de conexão/leitura e lease com a latência observada e a margem
+para persistir o resultado. Timeout não prova ausência de ativação: preservar o
+bloqueio de reenvio de resultados ambíguos. Retries permanecem limitados a falhas
+comprovadamente seguras, com backoff/jitter e até três tentativas; não habilitar
+retry apenas por lentidão ou por HTTP 429/503.
+
+### 5. Qual hipótese poderia relacionar os sintomas?
+
+Uma hipótese verificável é: provedor lento reduz a vazão do worker; se a chegada
+superar essa vazão, o backlog cresce e consultas de claim/listagem podem ficar
+mais caras, disputar I/O/conexões com a API e elevar também o tempo do POST.
+Validar a sequência temporal entre duração externa, entrada/saída de trabalho,
+backlog, planos/tempo SQL, I/O e espera Hikari sob carga equivalente. Reproduzir
+com atraso controlado no WireMock e observar se o POST só degrada quando aparece
+essa contenção; se ela não aparecer, a hipótese não explica a demora da criação.
+
+Outra possibilidade seria uma regressão que mantivesse conexão/transação aberta
+durante o HTTP, causando retenção de conexões e locks. Isso contraria as fronteiras
+atuais e exige prova na versão implantada, por tempos de transação, atividade do
+banco e spans ou perfil de threads. Os números do cenário, isoladamente, não
+confirmam nenhuma dessas causas; rede ou armazenamento compartilhados também
+devem ser examinados conforme os sinais coletados.
+
+### 6. Como validar a correção e prever rollback?
+
+Registrar a linha de base e repetir a carga com as mesmas taxas de chegada,
+concorrência, mistura de rotas, massa de dados, recursos, aquecimento e perfil
+de latência/erros do provedor. Comparar p50/p95/p99 da API por rota, erros,
+latência SQL e externa, espera/ocupação do pool, locks, vazão e tamanho/idade do
+backlog. Definir antes os limites aceitáveis; os tempos iniciais são referência,
+não um SLO já validado. Confirmar que a melhora não veio de rejeitar mais tráfego
+ou apenas acumular trabalho pendente.
+
+Executar regressão funcional e de carga, incluindo provedor lento, indisponível
+e timeout; verificar resposta do POST independente do HTTP externo, progresso do
+worker e ausência de reenvio ambíguo. Após publicação, acompanhar esses mesmos
+indicadores em uma janela representativa. Manter versão/configuração anterior e
+gatilhos de rollback para piora de p95/p99, erros, pool ou backlog; para mudanças
+de schema, planejar compatibilidade com a versão anterior antes do rollout.
+Esta seção descreve o procedimento proposto, sem alegar incidente reproduzido,
+benchmark, correção operacional ou rollback já executados.
+
 ## Testes e integração contínua
 
 Para executar somente os testes unitários de autorização por escopo e de geração
