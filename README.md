@@ -390,6 +390,11 @@ HTTP, Spring, entidade JPA ou DTOs públicos.
 um código interno categorizado. `TransientFailure` exige garantia contratual de
 não ativação e pode informar `Optional<Instant> retryAfter`, já interpretado pela
 integração. `Indeterminate` exige reconciliação e não autoriza reenvio automático.
+Os construtores das variantes de falha rejeitam códigos nulos, em branco segundo
+`String.isBlank()` ou maiores que 100 unidades UTF-16 com `IllegalArgumentException`.
+`TransientFailure` também rejeita `retryAfter` nulo: a ausência deve ser representada
+por `Optional.empty()`. Códigos válidos e a precisão do instante são preservados,
+sem normalização; a integração continua responsável por interpretar `Retry-After`.
 Cada chamada representa uma única tentativa, fora de transação de banco;
 persistência, limite de tentativas e agendamento continuam a cargo da aplicação.
 
