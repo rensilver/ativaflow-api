@@ -1,11 +1,5 @@
 package com.rensilver.ativaflow_api.client.provider;
 
-import java.time.Clock;
-import java.time.Instant;
-import java.time.ZoneOffset;
-import java.util.Optional;
-import java.util.stream.IntStream;
-
 import com.github.tomakehurst.wiremock.junit5.WireMockRuntimeInfo;
 import com.github.tomakehurst.wiremock.junit5.WireMockTest;
 import com.rensilver.ativaflow_api.client.provider.dto.ActivationProviderRequest;
@@ -13,8 +7,6 @@ import com.rensilver.ativaflow_api.config.ActivationProviderConfiguration;
 import com.rensilver.ativaflow_api.domain.ProviderOutcome;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
-import org.junit.jupiter.params.provider.CsvSource;
-import org.junit.jupiter.params.provider.MethodSource;
 import org.junit.jupiter.params.provider.ValueSource;
 import org.springframework.boot.autoconfigure.AutoConfigurations;
 import org.springframework.boot.autoconfigure.http.client.HttpClientAutoConfiguration;
@@ -38,15 +30,13 @@ import static org.assertj.core.api.Assertions.assertThat;
 class HttpActivationProviderClientTests {
 
 	private static final String PATH = "/provider/v1/activate";
-	private static final Instant NOW = Instant.parse("2026-10-29T12:00:00Z");
 	private static final ActivationProviderRequest REQUEST =
 			new ActivationProviderRequest(" EXT-12345 ", "Cliente-ação", " INTERNET-500 ");
 
 	private final ApplicationContextRunner contextRunner = new ApplicationContextRunner()
 			.withConfiguration(AutoConfigurations.of(HttpClientAutoConfiguration.class,
 					JacksonAutoConfiguration.class, RestClientAutoConfiguration.class))
-			.withUserConfiguration(ActivationProviderConfiguration.class)
-			.withBean(Clock.class, () -> Clock.fixed(NOW, ZoneOffset.UTC));
+			.withUserConfiguration(ActivationProviderConfiguration.class);
 
 	@Test
 	void sendsOnlyThePersistedBusinessFieldsToTheConfiguredBaseUrl(WireMockRuntimeInfo wireMock) {
@@ -69,14 +59,10 @@ class HttpActivationProviderClientTests {
 	}
 
 	@ParameterizedTest
-	@MethodSource("successStatuses")
-	void treatsEveryTwoHundredStatusAsCompletedWithoutParsingABody(int status, WireMockRuntimeInfo wireMock) {
+	@ValueSource(ints = {200, 201, 204})
+	void treatsContractedSuccessStatusesAsCompletedWithoutParsingABody(int status, WireMockRuntimeInfo wireMock) {
 		stubFor(post(PATH).willReturn(aResponse().withStatus(status).withBody("not a JSON response")));
 		assertOutcome(wireMock, new ProviderOutcome.Success());
-	}
-
-	private static IntStream successStatuses() {
-		return IntStream.rangeClosed(200, 299);
 	}
 
 	@Test
@@ -96,9 +82,9 @@ class HttpActivationProviderClientTests {
 
 	@ParameterizedTest
 	@ValueSource(ints = {429, 503})
-	void mapsSafeFailuresUnderTheSimulatedContractWithoutRetrying(int status, WireMockRuntimeInfo wireMock) {
+	void treatsUncontractedRateLimitAndUnavailableResponsesAsIndeterminate(int status, WireMockRuntimeInfo wireMock) {
 		stubFor(post(PATH).willReturn(aResponse().withStatus(status)));
-		assertOutcome(wireMock, new ProviderOutcome.TransientFailure("PROVIDER_TEMPORARILY_UNAVAILABLE", Optional.empty()));
+		assertOutcome(wireMock, new ProviderOutcome.Indeterminate("PROVIDER_UNCONFIRMED_RESPONSE"));
 	}
 
 	@Test
@@ -110,7 +96,7 @@ class HttpActivationProviderClientTests {
 	}
 
 	@ParameterizedTest
-	@ValueSource(ints = {301, 302, 303, 307, 308, 401, 403, 404, 409, 502, 504})
+	@ValueSource(ints = {202, 205, 301, 302, 303, 307, 308, 401, 403, 404, 409, 429, 502, 503, 504})
 	void preservesUncontractedOutcomesAndDoesNotFollowRedirects(int status, WireMockRuntimeInfo wireMock) {
 		stubFor(post(PATH).willReturn(aResponse().withStatus(status)
 				.withHeader("Location", wireMock.getHttpBaseUrl() + "/redirect-target")));
@@ -119,28 +105,10 @@ class HttpActivationProviderClientTests {
 		verify(0, anyRequestedFor(urlEqualTo("/redirect-target")));
 	}
 
-	@ParameterizedTest
-	@CsvSource({"429,0,2026-10-29T12:00:00Z", "503,120,2026-10-29T12:02:00Z",
-			"429,'Thu, 29 Oct 2026 12:05:00 GMT',2026-10-29T12:05:00Z",
-			"503,'Thu, 29 Oct 2026 12:05:00 GMT',2026-10-29T12:05:00Z"})
-	void interpretsRetryAfterWithoutTruncatingTheProviderDeadline(int status, String header, Instant expected,
-			WireMockRuntimeInfo wireMock) {
-		stubFor(post(PATH).willReturn(aResponse().withStatus(status).withHeader("Retry-After", header)));
-		assertOutcome(wireMock, new ProviderOutcome.TransientFailure("PROVIDER_TEMPORARILY_UNAVAILABLE", Optional.of(expected)));
-	}
-
-	@ParameterizedTest
-	@ValueSource(strings = {"invalid", "-1", "1.5", "Thu, 29 Oct 2026 11:00:00 GMT"})
-	void ignoresInvalidOrPastRetryAfter(String header, WireMockRuntimeInfo wireMock) {
-		stubFor(post(PATH).willReturn(aResponse().withStatus(503).withHeader("Retry-After", header)));
-		assertOutcome(wireMock, new ProviderOutcome.TransientFailure("PROVIDER_TEMPORARILY_UNAVAILABLE", Optional.empty()));
-	}
-
 	@Test
-	void doesNotAuthorizeRetryWhenTheDeadlineCannotBeRepresented(WireMockRuntimeInfo wireMock) {
-		stubFor(post(PATH).willReturn(aResponse().withStatus(503)
-				.withHeader("Retry-After", "9999999999999999999999999999999999999999")));
-		assertOutcome(wireMock, new ProviderOutcome.Indeterminate("PROVIDER_RETRY_AFTER_OUT_OF_RANGE"));
+	void retryAfterDoesNotMakeAnUncontractedUnavailableResponseSafe(WireMockRuntimeInfo wireMock) {
+		stubFor(post(PATH).willReturn(aResponse().withStatus(503).withHeader("Retry-After", "120")));
+		assertOutcome(wireMock, new ProviderOutcome.Indeterminate("PROVIDER_UNCONFIRMED_RESPONSE"));
 	}
 
 	@Test

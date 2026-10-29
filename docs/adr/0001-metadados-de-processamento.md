@@ -69,8 +69,9 @@ chamada remota após uma falha do processo.
 
 O limite é de **3 tentativas totais**, incluindo a primeira. A política de retry
 calcula backoff exponencial com jitter e respeita `Retry-After`
-válido; persiste o instante escolhido, sem espera com `Thread.sleep`. Nem um
-HTTP 500/503 nem o esgotamento do contador confirmam ausência de ativação.
+válido quando a resposta comprova não ativação; persiste o instante escolhido,
+sem espera com `Thread.sleep`. HTTP 429/500/503, timeout e esgotamento do
+contador não confirmam ausência de ativação por si sós.
 Resultado indeterminado permanece em `PROCESSING`, mesmo na terceira tentativa.
 O backoff inicia em 1 s, dobra por tentativa e limita a base a 1 min, com jitter
 adicional de até 25%, configuráveis em `app.worker.retry`. O jitter não reduz a
