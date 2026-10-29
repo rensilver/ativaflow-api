@@ -33,7 +33,8 @@ Não copie os arquivos gerados para o repositório, nem para fixtures de testes.
 
 Diretórios são criados com permissão `700`; arquivos, com `600`. Nenhum token ou
 chave é escrito no console. O token tem `iss=https://ativaflow.local`,
-`aud=ativaflow-api`, `sub=demo-consumer`, `token_use=access`, `iat`, `nbf`, `exp`
+`aud=ativaflow-api`, `sub=demo-consumer`, `token_use=access`,
+`scope="requests/read requests/write"`, `iat`, `nbf`, `exp`
 e header `kid`.
 Esses valores são exclusivos da demonstração local.
 

@@ -60,7 +60,14 @@ inválidos em rotas protegidas passam pelo tratamento Bearer existente e retorna
 inclusive quando há somente um issuer configurado. Tokens locais antigos sem
 `token_use=access` precisam ser renovados pelo utilitário atualizado.
 
-Escopos e conversão de identidade para `client_id` continuam fora desta etapa.
+O POST `/api/v1/requests` exige a authority `SCOPE_requests/write`. Os GETs
+`/api/v1/requests` e `/api/v1/requests/{id}` exigem `SCOPE_requests/read`.
+O conversor padrão do Spring adiciona `SCOPE_` aos escopos do JWT. O utilitário
+local emite `scope="requests/read requests/write"` na criação e na renovação;
+renove tokens antigos sem escopos para usar os endpoints. Um token válido sem o
+escopo necessário recebe `403` com Problem Details e desafio Bearer
+`insufficient_scope`; a ausência de autenticação recebe `401`.
+A conversão de identidade para `client_id` continua fora desta etapa.
 
 Sem issuer, JWKS ou chave pública que permita configurar um decoder, a aplicação
 falha na inicialização. Não há fallback que libere acesso sem validação.

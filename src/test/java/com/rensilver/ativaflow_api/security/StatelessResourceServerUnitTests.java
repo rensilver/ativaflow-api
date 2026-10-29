@@ -223,6 +223,7 @@ class StatelessResourceServerUnitTests {
 		}
 		var now = Instant.now();
 		var claims = new JWTClaimsSet.Builder().subject("client-one")
+				.claim("scope", "requests/read requests/write")
 				.issuer(variant.equals("wrong-issuer") ? "https://untrusted.example.test" : ISSUER)
 				.expirationTime(Date.from(now.plusSeconds(variant.equals("expired") ? -120 : 600)))
 				.notBeforeTime(Date.from(now.plusSeconds(variant.equals("future") ? 120 : -120))).build();

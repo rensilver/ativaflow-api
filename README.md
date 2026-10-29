@@ -1258,8 +1258,14 @@ Swagger/OpenAPI e health/probes preservam o acesso público existente.
 No perfil `local`, o contrato de demonstração exige assinatura RS256, `iss`,
 `exp`, audience da API e `token_use=access`; valida `nbf` quando presente,
 tanto com PEM quanto com JWKS. A identidade do consumidor continua em `sub`.
-As regras `requests/read` e `requests/write` e os contratos de emissores externos
-dependem das próximas etapas.
+O POST `/api/v1/requests` exige `SCOPE_requests/write`; os GETs de listagem e de
+consulta por ID exigem `SCOPE_requests/read`. O Spring converte os escopos do
+JWT em authorities com o prefixo `SCOPE_`: por exemplo,
+`scope="requests/read requests/write"` permite as três operações.
+Sem autenticação, a API responde `401`; com token válido sem o escopo exigido,
+responde `403` com Problem Details e desafio Bearer `insufficient_scope`.
+O token de demonstração local inclui os dois escopos na criação e na renovação.
+Os contratos de emissores externos dependem das próximas etapas.
 
 Veja [Configuração JWT e demonstração local](docs/resource-server.md) para variáveis
 de ambiente, JWKS, audience e geração de chave/token efêmeros fora do repositório.
@@ -1282,6 +1288,13 @@ bash ./mvnw -Dtest=LocalAccessTokenValidationUnitTests,LocalAccessTokenMaterialU
 ```
 
 ## Testes e integração contínua
+
+Para executar somente os testes unitários de autorização por escopo e de geração
+dos escopos no token local, sem banco, Docker ou rede:
+
+```bash
+bash ./mvnw '-Dtest=RequestScopeAuthorizationUnitTests,LocalAccessTokenMaterialUnitTests#localTokensGrantReadAndWriteScopes' test
+```
 
 Para executar o build e os testes:
 

@@ -7,6 +7,7 @@ import org.springframework.boot.actuate.endpoint.web.WebServerNamespace;
 import org.springframework.boot.actuate.health.HealthEndpoint;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
+import org.springframework.http.HttpMethod;
 import org.springframework.security.config.annotation.web.builders.HttpSecurity;
 import org.springframework.security.config.annotation.web.configurers.AbstractHttpConfigurer;
 import org.springframework.security.config.http.SessionCreationPolicy;
@@ -28,6 +29,10 @@ public class SecurityConfiguration {
 						.requestMatchers(EndpointRequest.to(HealthEndpoint.class),
 								EndpointRequest.toAdditionalPaths(WebServerNamespace.SERVER, HealthEndpoint.class))
 						.permitAll()
+						.requestMatchers(HttpMethod.POST, "/api/v1/requests")
+						.hasAuthority("SCOPE_requests/write")
+						.requestMatchers(HttpMethod.GET, "/api/v1/requests", "/api/v1/requests/**")
+						.hasAuthority("SCOPE_requests/read")
 						.anyRequest().authenticated())
 				.cors(withDefaults())
 				.exceptionHandling(exceptions -> exceptions

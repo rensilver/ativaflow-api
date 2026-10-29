@@ -197,6 +197,7 @@ class ResourceServerSecurityConfigurationUnitTests {
 
 	private static String token(KeyPair keys, String issuer, Instant expiresAt) throws JOSEException {
 		var claims = new JWTClaimsSet.Builder().issuer(issuer).subject("consumer-one")
+				.claim("scope", "requests/read requests/write")
 				.expirationTime(java.util.Date.from(expiresAt)).build();
 		var jwt = new SignedJWT(new JWSHeader(JWSAlgorithm.RS256), claims);
 		jwt.sign(new RSASSASigner((RSAPrivateKey) keys.getPrivate()));
