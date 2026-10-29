@@ -64,7 +64,8 @@ class GetActivationRequestEndpointTests {
 		UUID id = insertRequest(CONSUMER);
 		String path = "/api/v1/requests/" + id;
 
-		var inaccessible = mockMvc.perform(get(path).with(user("another-consumer")))
+		var inaccessible = mockMvc.perform(get(path).with(user("another-consumer"))
+				.header("X-Correlation-ID", "lookup-error-test"))
 				.andExpect(status().isNotFound())
 				.andExpect(content().contentTypeCompatibleWith(MediaType.APPLICATION_PROBLEM_JSON))
 				.andExpect(jsonPath("$.type").value("about:blank"))
@@ -72,12 +73,13 @@ class GetActivationRequestEndpointTests {
 				.andExpect(jsonPath("$.status").value(404))
 				.andExpect(jsonPath("$.detail").isString())
 				.andExpect(jsonPath("$.instance").value(path))
-				.andExpect(jsonPath("$.length()").value(5))
+				.andExpect(jsonPath("$.correlationId").value("lookup-error-test"))
+				.andExpect(jsonPath("$.length()").value(6))
 				.andReturn().getResponse().getContentAsString();
 
 		jdbcTemplate.update("DELETE FROM activation_requests WHERE id = ?", id);
 
-		mockMvc.perform(get(path).with(user("another-consumer")))
+		mockMvc.perform(get(path).with(user("another-consumer")).header("X-Correlation-ID", "lookup-error-test"))
 				.andExpect(status().isNotFound())
 				.andExpect(content().contentTypeCompatibleWith(MediaType.APPLICATION_PROBLEM_JSON))
 				.andExpect(content().json(inaccessible));

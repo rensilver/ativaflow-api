@@ -633,6 +633,56 @@ O controller de criação aciona a validação com `@Valid` no parâmetro
 `@RequestBody`. As anotações não validam automaticamente uma chamada direta ao
 construtor do record.
 
+## Tratamento centralizado de erros
+
+`ApiExceptionHandler`, anotado com `@RestControllerAdvice`, estende
+[`ResponseEntityExceptionHandler`](https://docs.spring.io/spring-framework/docs/6.2.8/javadoc-api/org/springframework/web/servlet/mvc/method/annotation/ResponseEntityExceptionHandler.html)
+para centralizar exceções da aplicação e do Spring MVC. As respostas seguem
+Problem Details (RFC 9457), com `Content-Type: application/problem+json`,
+`type: about:blank`, `title`, `status`, `detail` e `instance`. O campo
+`correlationId` corresponde ao header `X-Correlation-ID` validado ou gerado pelo
+filtro existente; o mesmo identificador aparece no evento de log. `instance`
+contém apenas o caminho, sem os parâmetros da query string.
+
+| Situação | Status HTTP | Resposta |
+| --- | --- | --- |
+| JSON inválido, ausente ou com propriedades desconhecidas | 400 | `Invalid request body`. |
+| Bean Validation no corpo ou nos parâmetros | 400 | Mensagem segura e `errors: [{field, message}]`, sem valores rejeitados. |
+| Tipo de parâmetro inválido ou paginação fora dos limites | 400 | `Invalid request parameters`. |
+| Solicitação inexistente ou de outro consumidor | 404 | `Activation request not found`. |
+| Colisão de `externalId` | 409 | `Activation request conflict`. |
+| Outros erros do MVC, como método ou mídia incompatíveis | Status do MVC | Mensagem segura, preservando cabeçalhos como `Allow`. |
+| Falha inesperada ou validação do valor retornado pelo controller | 500 | `An unexpected error occurred`. |
+
+Erros de validação podem incluir, por exemplo:
+
+```json
+{
+  "type": "about:blank",
+  "title": "Bad Request",
+  "status": 400,
+  "detail": "Request validation failed",
+  "instance": "/api/v1/requests",
+  "correlationId": "client-request-123",
+  "errors": [{"field": "customerId", "message": "customerId é obrigatório"}]
+}
+```
+
+O corpo público não inclui stack traces, SQL ou mensagens internas de exceções.
+Rejeições geram `api_request_rejected` em `WARN`, com `status` e `correlationId`,
+sem registrar payload ou valores rejeitados. Falhas 5xx geram
+`api_request_failed` em `ERROR`, com a exceção detalhada no log interno.
+Exceções de autenticação e autorização continuam sob responsabilidade da
+cadeia Spring Security; a padronização dos erros 401/403 dos filtros permanece
+pendente junto com JWT e escopos.
+
+`ApiExceptionHandlerUnitTests` exercita o contrato HTTP com MockMvc standalone,
+validação e serialização reais, sem Spring Boot, banco ou provedor externo:
+
+```bash
+bash ./mvnw -Dtest=ApiExceptionHandlerUnitTests test
+```
+
 ## Criação de solicitações
 
 `POST /api/v1/requests` recebe os três identificadores descritos acima. O serviço
@@ -692,7 +742,8 @@ O conflito usa `Content-Type: application/problem+json`, sem header `Location`:
   "title": "Conflict",
   "status": 409,
   "detail": "Activation request conflict",
-  "instance": "/api/v1/requests"
+  "instance": "/api/v1/requests",
+  "correlationId": "client-request-123"
 }
 ```
 
@@ -826,7 +877,8 @@ existência ou os dados de solicitações alheias:
   "title": "Not Found",
   "status": 404,
   "detail": "Activation request not found",
-  "instance": "/api/v1/requests/0b7f3c1e-5d2a-4c4e-9a51-2f8d7b1e6c90"
+  "instance": "/api/v1/requests/0b7f3c1e-5d2a-4c4e-9a51-2f8d7b1e6c90",
+  "correlationId": "client-request-123"
 }
 ```
 
@@ -1212,8 +1264,8 @@ bash ./mvnw -B --no-transfer-progress \
   '-Dtest=CreateActivationRequestEndpointTests#concurrentIdenticalRequestsCreateOneRecordAndReturnItToEveryCaller+requestsLosingUniqueConstraintRaceApplyRepetitionRulesAfterRollback' test
 ```
 
-O contrato de conflito exige os cinco campos de Problem Details, sem campos
-extras ou `Location`, nos quatro status, mesmo com os metadados internos de
+O contrato de conflito exige os cinco campos de Problem Details e `correlationId`,
+sem dados internos ou `Location`, nos quatro status, mesmo com os metadados internos de
 processamento preenchidos, preservando todos os campos persistidos. Após uma
 colisão entre consumidores, os testes exigem `404` na consulta individual e
 listagem sem o registro alheio ou seus totais; o consumidor recusado ainda pode

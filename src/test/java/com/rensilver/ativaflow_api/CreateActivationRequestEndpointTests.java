@@ -346,12 +346,12 @@ class CreateActivationRequestEndpointTests {
 				.contentType(MediaType.APPLICATION_JSON).content(objectMapper.writeValueAsString(payload)))
 				.andReturn();
 		assertConflictProblem(collision);
-		mockMvc.perform(get(location).with(user(OTHER_CONSUMER)))
+		mockMvc.perform(get(location).with(user(OTHER_CONSUMER)).header("X-Correlation-ID", "consumer-collision-test"))
 				.andExpect(status().isNotFound())
 				.andExpect(content().contentTypeCompatibleWith(MediaType.APPLICATION_PROBLEM_JSON))
 				.andExpect(content().json("""
 						{"type":"about:blank","title":"Not Found","status":404,
-						 "detail":"Activation request not found","instance":"%s"}
+						 "detail":"Activation request not found","instance":"%s","correlationId":"consumer-collision-test"}
 						""".formatted(location), JsonCompareMode.STRICT));
 		mockMvc.perform(get(PATH).with(user(OTHER_CONSUMER)))
 				.andExpect(status().isOk())
@@ -511,9 +511,10 @@ class CreateActivationRequestEndpointTests {
 				  "title": "Conflict",
 				  "status": 409,
 				  "detail": "Activation request conflict",
-				  "instance": "/api/v1/requests"
+				  "instance": "/api/v1/requests",
+				  "correlationId": "%s"
 				}
-				""", JsonCompareMode.STRICT).match(result);
+				""".formatted(result.getResponse().getHeader("X-Correlation-ID")), JsonCompareMode.STRICT).match(result);
 	}
 
 	@ParameterizedTest
