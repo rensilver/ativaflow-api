@@ -433,7 +433,8 @@ Nenhum campo de resposta é obrigatório; não há schema de erro presumido.
 | `204` (padrão), `200` ou `201` | Confirmam conclusão no contrato simulado: `COMPLETED`, sem retry; corpo dispensável. |
 | `202 Accepted` | Não confirma conclusão; `PROCESSING` com reconciliação, sem reenvio automático. |
 | `400` | No mock, rejeição permanente sem ativação: `FAILED`, sem retry. |
-| `500`, `429` ou `503` | **Somente no contrato do mock**, garantem não ativação: até três tentativas totais, com backoff, jitter e `Retry-After` válido; terceira falha segura encerra em `FAILED`. |
+| `500` | Efeito potencialmente aplicado: `PROCESSING` com reconciliação, sem reenvio automático. |
+| `429` ou `503` | **Somente no contrato do mock**, garantem não ativação: até três tentativas totais, com backoff, jitter e `Retry-After` válido; terceira falha segura encerra em `FAILED`. |
 | Timeout, resposta não contratada ou erro sem garantia de não ativação | `PROCESSING` com reconciliação, sem retry automático. |
 
 A garantia do mock não se transfere a um provedor real ao mudar a URL base.
@@ -443,7 +444,8 @@ A ADR detalha campos, headers, `Retry-After`, limites e critérios futuros de te
 
 O cliente traduz essa matriz para `ProviderOutcome`, com códigos internos
 `PROVIDER_REJECTED`, `PROVIDER_TEMPORARILY_UNAVAILABLE`,
-`PROVIDER_UNCONFIRMED_RESPONSE` e `PROVIDER_COMMUNICATION_FAILURE`.
+`PROVIDER_INTERNAL_ERROR_OUTCOME_UNKNOWN`, `PROVIDER_UNCONFIRMED_RESPONSE` e
+`PROVIDER_COMMUNICATION_FAILURE`.
 Os corpos de resposta são ignorados. Em falhas transitórias contratadas,
 `Retry-After` aceita segundos inteiros não negativos e data HTTP RFC 1123;
 valores inválidos ou datas passadas produzem `Optional.empty()`. Um prazo futuro

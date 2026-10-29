@@ -95,10 +95,18 @@ class HttpActivationProviderClientTests {
 	}
 
 	@ParameterizedTest
-	@ValueSource(ints = {500, 429, 503})
+	@ValueSource(ints = {429, 503})
 	void mapsSafeFailuresUnderTheSimulatedContractWithoutRetrying(int status, WireMockRuntimeInfo wireMock) {
 		stubFor(post(PATH).willReturn(aResponse().withStatus(status)));
 		assertOutcome(wireMock, new ProviderOutcome.TransientFailure("PROVIDER_TEMPORARILY_UNAVAILABLE", Optional.empty()));
+	}
+
+	@Test
+	void treatsInternalServerErrorAsIndeterminateEvenWhenRetryAfterIsPresent(WireMockRuntimeInfo wireMock) {
+		stubFor(post(PATH).willReturn(aResponse().withStatus(500)
+				.withHeader("Retry-After", "120")
+				.withBody("provider may have activated the product")));
+		assertOutcome(wireMock, new ProviderOutcome.Indeterminate("PROVIDER_INTERNAL_ERROR_OUTCOME_UNKNOWN"));
 	}
 
 	@ParameterizedTest
