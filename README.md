@@ -492,7 +492,7 @@ Nenhum campo de resposta é obrigatório; não há schema de erro presumido.
 | `202 Accepted` | Não confirma conclusão; `PROCESSING` com reconciliação, sem reenvio automático. |
 | `400` | No mock, rejeição permanente sem ativação: `FAILED`, sem retry. |
 | `500` | Efeito potencialmente aplicado: `PROCESSING` com reconciliação, sem reenvio automático. |
-| `429` ou `503` | **Somente no contrato do mock**, garantem não ativação: até três tentativas totais, com backoff, jitter e `Retry-After` válido; terceira falha segura encerra em `FAILED`. |
+| `429` ou `503` | No cliente atual, `PROCESSING` com reconciliação, sem reenvio automático, inclusive com `Retry-After`. Uma garantia de não ativação simulada no mock não é inferida pela URL configurada. |
 | Timeout, resposta não contratada ou erro sem garantia de não ativação | `PROCESSING` com reconciliação, sem retry automático. |
 
 A garantia do mock não se transfere a um provedor real ao mudar a URL base.
@@ -501,15 +501,14 @@ o mecanismo real precisa ser contratado, e o JWT do consumidor não é encaminha
 A ADR detalha campos, headers, `Retry-After`, limites e critérios futuros de teste.
 
 O cliente traduz essa matriz para `ProviderOutcome`, com códigos internos
-`PROVIDER_REJECTED`, `PROVIDER_TEMPORARILY_UNAVAILABLE`,
-`PROVIDER_INTERNAL_ERROR_OUTCOME_UNKNOWN`, `PROVIDER_UNCONFIRMED_RESPONSE` e
-`PROVIDER_COMMUNICATION_FAILURE`.
-Os corpos de resposta são ignorados. Em falhas transitórias contratadas,
-`Retry-After` aceita segundos inteiros não negativos e data HTTP RFC 1123;
-valores inválidos ou datas passadas produzem `Optional.empty()`. Um prazo futuro
-válido é preservado, mesmo acima do teto de backoff. Overflow na representação
-do prazo produz `Indeterminate(PROVIDER_RETRY_AFTER_OUT_OF_RANGE)`.
-O agendamento e a persistência desses resultados continuam a cargo da aplicação.
+`PROVIDER_REJECTED`, `PROVIDER_INTERNAL_ERROR_OUTCOME_UNKNOWN`,
+`PROVIDER_UNCONFIRMED_RESPONSE`, `PROVIDER_TIMEOUT` e `PROVIDER_COMMUNICATION_FAILURE`.
+Os corpos de resposta são ignorados. A interpretação de `Retry-After` em segundos
+ou data HTTP para retry seguro depende de uma futura integração com garantia
+contratual explícita de não ativação, conforme o ADR-0002. O cliente atual não
+produz `TransientFailure` a partir de `429/503`. O handler já recebe
+`Optional<Instant>` em falhas comprovadamente seguras e encaminha o prazo ao
+serviço de resultados para persistência, inclusive quando ultrapassa o teto de backoff.
 
 Para HTTP `400`, o worker encaminha `PermanentFailure` ao
 `ActivationRequestOutcomeService.recordPermanentFailure`: a solicitação termina
@@ -1089,6 +1088,29 @@ Para executar somente essa classe:
 ```bash
 bash ./mvnw -B --no-transfer-progress -Dtest=HttpActivationProviderWireMockTests test
 ```
+
+Os testes unitários de resiliência e retomada podem ser executados isoladamente:
+
+```bash
+bash ./mvnw -B --no-transfer-progress \
+  -Dtest=HttpActivationProviderResilienceUnitTests,ActivationRequestOutcomeResilienceUnitTests,ActivationRequestWorkerRecoveryUnitTests,ActivationRequestLeaseRecoveryUnitTests test
+```
+
+Essas quatro classes não iniciam contexto Spring, banco, servidor HTTP ou containers.
+O transporte simulado verifica uma única chamada e a classificação de `429/503`
+com `Retry-After` ausente, em segundos, data HTTP, inválido, negativo ou enorme.
+Exceções de timeout de conexão/leitura são injetadas, inclusive com causas aninhadas;
+o tempo real de expiração não é medido nesses testes unitários.
+Handler e serviços reais são exercitados com repositório simulado: resultados
+ambíguos usam exclusivamente reconciliação nas três tentativas; falhas seguras
+encaminham contador, limite total configurado de uma a três tentativas, backoff e
+prazo do provedor à persistência. O worker é recriado para verificar retomada de
+trabalho elegível sem alterar o número preparado ou o payload, continuidade após
+resultado ambíguo e ausência de reenvio imediato quando perde a posse.
+A recuperação de leases preserva os limites de lote e tentativas e rejeita lote inválido.
+Elegibilidade SQL, cálculo persistido de `next_attempt_at`, esgotamento efetivo das
+tentativas, bloqueio por reconciliação e durabilidade após restart são responsabilidades
+dos testes de integração PostgreSQL existentes; não são comprovados por esses mocks.
 
 `CorrelationIdFilterTests`, `HttpActivationProviderCorrelationTests` e
 `ActivationRequestCorrelationPropagationTests` verificam geração/validação do
