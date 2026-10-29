@@ -2,9 +2,11 @@
 
 Projeto Java 21 com Spring Boot 3.5.16, organizado em camadas para uma API REST.
 A base atual reúne dependências, configurações por ambiente, estrutura de pacotes,
-migrações e entidade JPA com transições de estado, auditoria e controle otimista.
+migrações, entidade JPA com transições de estado, auditoria e controle otimista,
+e DTOs públicos como records com Bean Validation na entrada, além da criação
+de solicitações por `POST /api/v1/requests` e consulta por `GET /api/v1/requests/{id}`.
 Os pacotes de aplicação possuem suas responsabilidades descritas em
-`package-info.java`; endpoints e integração com o provedor ainda estão pendentes.
+`package-info.java`; listagem e integração com o provedor ainda estão pendentes.
 
 ## Tecnologias e dependências
 
@@ -116,13 +118,13 @@ adiciona os campos internos abaixo, preservando a V1 e o contrato público:
 consumidor autenticado; o segundo identifica o cliente informado no pedido.
 A derivação de `consumer_id` da identidade confiável do JWT (por exemplo,
 `client_id`) será implementada na etapa de autenticação. Ele não poderá ser
-aceito do payload. Os DTOs públicos deverão aceitar apenas `externalId`,
-`customerId` e `productCode` na criação e expor apenas `id`, `externalId`,
+aceito do payload. Os DTOs públicos aceitam apenas `externalId`,
+`customerId` e `productCode` na criação e expõem apenas `id`, `externalId`,
 `customerId`, `productCode`, `status`, `createdAt` e `updatedAt` nas respostas.
 Nenhuma das oito colunas internas deverá ser exposta na API.
 
-O schema e a entidade JPA estão implementados e cobertos por testes.
-Autenticação, DTOs, endpoints, worker, retries, lease e reconciliação ainda estão
+O schema, a entidade JPA e os DTOs estão implementados e cobertos por testes.
+Autenticação, endpoints, worker, retries, lease e reconciliação ainda estão
 pendentes. Os campos opcionais começam nulos; a sinalização de reconciliação
 permitirá manter um resultado ambíguo em
 `PROCESSING`, sem adicionar estados públicos. O limite de tentativas será
@@ -133,10 +135,13 @@ operações forem implementadas.
 
 `model.ActivationRequest` mapeia todas as colunas de V1/V2, com acesso JPA pelos
 campos e construtor sem argumentos `protected`, compatível com o Hibernate.
-O construtor público recebe `externalId`, `customerId`, `productCode` e
-`consumerId`, exige texto não vazio de até 100 caracteres, preserva os valores
-sem normalização, gera o UUID na aplicação e inicia em `PENDING`. O proprietário
+O código de aplicação usa `ActivationRequest.create(externalId, customerId,
+productCode, trustedConsumerId)`. A factory delega a um construtor privado,
+exige texto não vazio de até 100 caracteres e preserva os valores sem normalização.
+Ela gera o UUID na aplicação e inicia em `PENDING`. O proprietário
 deve ser fornecido pela camada de autenticação confiável, nunca pelo payload.
+Não há construtor público para criação automática pelo MapStruct. A factory
+não recebe UUID, status, versão ou datas de auditoria.
 
 A entidade expõe getters, sem setters públicos ou builder. As mudanças de estado
 ocorrem por `startProcessing()` (`PENDING → PROCESSING`), `complete()`
@@ -171,6 +176,270 @@ proprietários antes de aplicar essa migração a um banco com dados.
 Os diretórios `infra/wiremock/mappings/`,
 `infra/wiremock/__files/` e `docs/adr/` também estão preparados, sem conteúdo além
 dos arquivos `.gitkeep`.
+
+## Contratos de entrada e saída
+
+`dto.request.CreateActivationRequest` é um record com os campos `externalId`,
+`customerId` e `productCode`.
+
+| Campo | Obrigatoriedade | Tamanho máximo | Formato |
+| --- | --- | --- | --- |
+| `externalId` | Texto não nulo, não vazio e não composto somente por espaços em branco. | 100 | Identificador textual, sem padrão adicional. |
+| `customerId` | Texto não nulo, não vazio e não composto somente por espaços em branco. | 100 | Identificador textual, sem padrão adicional. |
+| `productCode` | Texto não nulo, não vazio e não composto somente por espaços em branco. | 100 | Identificador textual, sem padrão adicional. |
+
+O teto de 100 é uma decisão técnica baseada nas colunas `VARCHAR(100)` existentes,
+não uma exigência de negócio ou do provedor. Não há tamanho mínimo adicional:
+um único caractere que não seja espaço em branco é suficiente. Não se exige UUID,
+CPF/CNPJ, conteúdo apenas numérico, prefixo ou consulta a um catálogo de produtos.
+Letras acentuadas, pontuação e espaços junto de texto são aceitos.
+
+`@NotBlankText` usa `String.isBlank()`, assim como o construtor da entidade:
+rejeita texto formado somente por caracteres reconhecidos por
+`Character.isWhitespace`, incluindo tabulação, quebra de linha, U+2003 e U+3000.
+A constraint própria evita a diferença do `@NotBlank` no Hibernate Validator 8,
+que usa `String.trim()` e aceita esses dois espaços Unicode. Ela não normaliza
+o valor nem impõe um formato aos identificadores.
+
+`@Size(max = 100)` e a entidade medem o tamanho com `String.length()`, em unidades
+UTF-16, incluindo os espaços. Por exemplo, `"a"` repetido 100 vezes é válido;
+101 vezes é inválido. Um emoji fora do plano básico Unicode, como `🚀`, ocupa
+duas unidades desse limite. O PostgreSQL conta caracteres Unicode em `VARCHAR`,
+portanto a validação Java pode ser mais restritiva para esses caracteres.
+
+Os identificadores são preservados sem trim, conversão entre maiúsculas e
+minúsculas ou outra normalização. Por exemplo, `" EXT-12345 "` conserva os
+espaços e eles contam para o limite. Os valores `"EXT-12345"` e `"ext-12345"`
+também são preservados como recebidos. A unicidade de `externalId` é uma regra
+separada, garantida pela constraint do banco; a validação do DTO não consulta
+duplicidades, existência de cliente ou disponibilidade do produto.
+
+```json
+{
+  "externalId": "EXT-12345",
+  "customerId": "CUST-10001",
+  "productCode": "INTERNET-500"
+}
+```
+
+`dto.response.ActivationRequestResponse` é um record com `id` (`UUID`),
+`externalId`, `customerId`, `productCode`, `status` (`ActivationStatus`),
+`createdAt` e `updatedAt` (`Instant`). O JSON usa UUID textual, os quatro nomes
+do enum como status e datas UTC em ISO-8601. Não contém proprietário,
+versão, contadores ou outros metadados internos.
+
+`mapper.ActivationRequestMapper` é um bean Spring gerado pelo MapStruct e oferece
+`toResponse(ActivationRequest)`. As políticas `unmappedTargetPolicy` e
+`unmappedSourcePolicy` usam `ReportingPolicy.ERROR`: propriedades sem mapeamento
+na resposta ou na entidade impedem a compilação. Os oito metadados internos
+existentes são exceções explícitas em `ignoreUnmappedSourceProperties`;
+essa lista dispensa apenas o diagnóstico de origem e não autoriza adicioná-los
+ao DTO público. O teste de JSON protege os sete campos permitidos na resposta.
+O mapper preserva identificadores, status e instantes, sem atribuir datas:
+auditoria ainda não preenchida permanece nula, e entidade nula produz resposta nula.
+Um teste de arquitetura impede que os mappers chamem a factory de criação.
+
+A desserialização Jackson rejeita propriedades desconhecidas na configuração
+compartilhada (`fail-on-unknown-properties: true`). Na criação, somente
+`externalId`, `customerId` e `productCode` são aceitos: tentativas de enviar `id`,
+`status`, `consumerId`/`owner`, auditoria ou metadados internos falham na leitura
+do JSON, antes de criar a entidade. Ao usar `@RequestBody`, essa falha é tratada
+pelo Spring MVC como HTTP 400.
+
+O controller de criação aciona a validação com `@Valid` no parâmetro
+`@RequestBody`. As anotações não validam automaticamente uma chamada direta ao
+construtor do record.
+
+## Criação de solicitações
+
+`POST /api/v1/requests` recebe os três identificadores descritos acima. O serviço
+cria a entidade pela factory de domínio e persiste uma linha em uma transação.
+O proprietário (`consumerId`) vem de `Principal.getName()`, conforme a identidade
+autenticada pelo Spring Security. O corpo não pode definir esse valor.
+
+Após o commit, a API responde `201 Created`, com
+`Location: /api/v1/requests/{id}` e os sete campos de `ActivationRequestResponse`.
+O UUID é gerado pelo servidor; `createdAt` e `updatedAt` são preenchidos pela
+auditoria JPA e expostos em UTC. A resposta é a fotografia imutável da criação
+em `PENDING`. A criação não chama o provedor nem inicia processamento externo.
+Esse corpo conserva o status e as datas da criação mesmo que um processamento
+posterior avance o registro antes de o JSON ser enviado. O `201` confirma a
+criação persistida; a conclusão da ativação pertence à etapa de processamento.
+Dados inválidos, propriedades desconhecidas ou campos controlados pelo servidor
+no JSON resultam em `400 Bad Request`, sem inserção.
+
+A segurança atual exige autenticação e CSRF. Exemplo com credenciais válidas,
+cookie de sessão e token CSRF obtidos na mesma sessão (por exemplo, no formulário
+`/login`):
+
+```bash
+curl -i -X POST http://localhost:8080/api/v1/requests \
+  --user "$API_USER:$API_PASSWORD" \
+  --cookie "JSESSIONID=$SESSION_ID" \
+  --header "X-CSRF-TOKEN: $CSRF_TOKEN" \
+  --header 'Content-Type: application/json' \
+  --data '{"externalId":"EXT-12345","customerId":"CUST-10001","productCode":"INTERNET-500"}'
+```
+
+JWT, escopos e a política HTTP para repetições de `externalId` ainda estão
+pendentes; a constraint de unicidade global continua garantida pelo PostgreSQL.
+
+## Consulta de solicitação
+
+`GET /api/v1/requests/{id}` recebe um UUID e retorna `200 OK` com os mesmos sete
+campos públicos da criação, refletindo o status e as datas atuais no banco.
+O consumidor é obtido de `Principal.getName()`, e a consulta filtra pelo ID e
+pelo proprietário no PostgreSQL. Metadados internos de processamento não são expostos.
+
+```bash
+curl -i "http://localhost:8080/api/v1/requests/$REQUEST_ID" \
+  --user "$API_USER:$API_PASSWORD" \
+  --header 'Accept: application/json'
+```
+
+Um UUID inexistente ou pertencente a outro consumidor produz a mesma resposta
+`404 Not Found`, com `Content-Type: application/problem+json`, sem revelar a
+existência ou os dados de solicitações alheias:
+
+```json
+{
+  "type": "about:blank",
+  "title": "Not Found",
+  "status": 404,
+  "detail": "Activation request not found",
+  "instance": "/api/v1/requests/0b7f3c1e-5d2a-4c4e-9a51-2f8d7b1e6c90"
+}
+```
+
+Um ID que não seja UUID resulta em `400 Bad Request`. A consulta exige
+autenticação; com `Accept: application/json`, chamadas anônimas recebem `401`.
+
+## Listagem de solicitações
+
+`GET /api/v1/requests` retorna `200 OK` com paginação iniciada em zero. Os filtros
+são opcionais e combinados com **AND**. A busca e a contagem no PostgreSQL sempre
+incluem o proprietário obtido de `Principal.getName()`, sem expor registros ou
+totais de outros consumidores.
+
+| Parâmetro | Contrato |
+| --- | --- |
+| `status` | `PENDING`, `PROCESSING`, `COMPLETED` ou `FAILED`, em maiúsculas. Ausente ou vazio não filtra por status. |
+| `customerId` | Igualdade exata, sensível a maiúsculas, sem remover espaços nem interpretar curingas. Se informado, deve conter texto não branco de até 100 unidades UTF-16, como na criação. |
+| `page` | Inteiro a partir de `0`; padrão `0`. |
+| `size` | Inteiro entre `1` e `100`; padrão `20`. |
+
+`page` e `size` vazios usam os respectivos padrões. Valores inválidos retornam
+`400 Bad Request` com `Content-Type: application/problem+json`. O deslocamento
+`page * size` deve ser no máximo `2147483647`, limite da paginação JPA.
+O serviço também valida página, tamanho e deslocamento antes de consultar o
+repositório, inclusive em chamadas que não passam pelo controller. O máximo de
+100 itens é compartilhado com a validação HTTP; valores maiores são rejeitados,
+sem truncamento silencioso. O limite mantém o conteúdo carregado e serializado
+por chamada sob controle.
+
+A ordenação é fixa em `createdAt DESC, id DESC`, incluindo o desempate por UUID
+no PostgreSQL. O parâmetro `sort` não altera essa ordem. A paginação ocorre no
+banco; apenas o conteúdo da página é convertido pelo mapper nos mesmos sete
+campos públicos usados pela consulta individual. A ordem é determinística para
+um conjunto de dados inalterado; inserções ou alterações entre chamadas podem
+deslocar resultados entre páginas.
+
+```bash
+curl -i --get http://localhost:8080/api/v1/requests \
+  --user "$API_USER:$API_PASSWORD" \
+  --header 'Accept: application/json' \
+  --data-urlencode 'status=PENDING' \
+  --data-urlencode 'customerId=CUST-10001' \
+  --data-urlencode 'page=0' \
+  --data-urlencode 'size=20'
+```
+
+O formato da resposta é um DTO estável, independente da serialização interna de
+`Page` do Spring Data:
+
+```json
+{
+  "content": [
+    {
+      "id": "0b7f3c1e-5d2a-4c4e-9a51-2f8d7b1e6c90",
+      "externalId": "EXT-12345",
+      "customerId": "CUST-10001",
+      "productCode": "INTERNET-500",
+      "status": "PENDING",
+      "createdAt": "2026-10-28T15:00:00Z",
+      "updatedAt": "2026-10-28T15:00:00Z"
+    }
+  ],
+  "page": 0,
+  "size": 20,
+  "totalElements": 1,
+  "totalPages": 1
+}
+```
+
+Sem correspondências, `content` é `[]`, `totalElements` e `totalPages` são `0`.
+Uma página além da última também retorna `200` e `content: []`, preservando os
+totais dos filtros e o número da página solicitada. A rota exige autenticação;
+com `Accept: application/json`, chamadas anônimas recebem `401`.
+
+### Acesso ao banco e índices da listagem
+
+A premissa de acesso é consultar as solicitações mais recentes de um consumidor,
+com filtros opcionais por status e/ou cliente. O repositório constrói predicados
+de igualdade apenas para os filtros presentes, sempre incluindo `consumer_id`.
+A mesma especificação JPA é aplicada ao conteúdo e à contagem. `ORDER BY`,
+`OFFSET` e o limite da página também são executados no PostgreSQL; não há
+filtragem ou paginação em memória.
+
+A migração **V3** adiciona três índices B-tree não únicos:
+
+| Acesso esperado | Colunas do índice, na ordem |
+| --- | --- |
+| Listagem recente do consumidor | `(consumer_id, created_at DESC, id DESC)` |
+| Listagem do consumidor por status | `(consumer_id, status, created_at DESC, id DESC)` |
+| Listagem do consumidor por cliente | `(consumer_id, customer_id, created_at DESC, id DESC)` |
+
+As igualdades ocupam o início de cada índice; as colunas seguintes correspondem
+à ordenação fixa, incluindo o desempate por ID. Isso permite buscar a página
+diretamente na ordem do índice. O índice sem filtros é necessário porque deixar
+`status` ou `customer_id` livres antes de `created_at` não atende à ordenação
+global do consumidor. Essa escolha segue as regras do PostgreSQL para
+[índices compostos](https://www.postgresql.org/docs/17/indexes-multicolumn.html) e
+[índices com ORDER BY e LIMIT](https://www.postgresql.org/docs/17/indexes-ordering.html).
+
+Com os dois filtros, o planejador pode usar um dos índices filtrados e aplicar
+o outro predicado como filtro residual. Não foi adicionado um quarto índice
+`(consumer_id, customer_id, status, created_at DESC, id DESC)`: falta evidência de
+que essa combinação seja predominante para justificar espaço e manutenção a
+cada escrita. Também não há índice isolado de `consumer_id` (prefixo já coberto),
+índice isolado de status (apenas quatro valores e nenhum acesso global na API)
+ou `(consumer_id, id)` (a chave primária já localiza no máximo uma linha por ID;
+o consumidor é verificado no SQL da consulta individual).
+
+`FlywayMigrationTests` prepara 16.000 linhas distribuídas entre 20 consumidores,
+quatro status e 20 clientes, atualiza estatísticas com `ANALYZE` e executa
+`EXPLAIN (ANALYZE, BUFFERS)` nas três listagens da tabela acima. Verifica que cada
+uma usa o índice correspondente sem uma etapa `Sort`, sem forçar opções do
+planejador. É evidência para essa distribuição sintética, não uma medição de
+produção. Para reavaliar com dados representativos, execute, por exemplo:
+
+```sql
+EXPLAIN (ANALYZE, BUFFERS)
+SELECT * FROM activation_requests
+WHERE consumer_id = 'consumer-1' AND status = 'PENDING'
+ORDER BY created_at DESC, id DESC LIMIT 20 OFFSET 0;
+
+EXPLAIN (ANALYZE, BUFFERS)
+SELECT count(*) FROM activation_requests
+WHERE consumer_id = 'consumer-1' AND status = 'PENDING';
+```
+
+Repita sem status, com `customer_id` e com ambos, usando tamanhos e deslocamentos
+representativos. O máximo de 100 limita o conteúdo da resposta; a contagem exata
+ainda percorre as correspondências e páginas profundas ainda têm custo de
+`OFFSET`. Revise planos, buffers e frequência real antes de ampliar os índices.
+A V3 usa `CREATE INDEX` transacional, que bloqueia escritas durante a construção;
+em tabelas grandes, programe essa migração em uma janela adequada.
 
 ## Perfis e variáveis de ambiente
 
@@ -247,9 +516,8 @@ continuam habilitados; a autenticação JWT ainda será implementada.
 A documentação fica disponível em todos os perfis. Para desativá-la, configure
 `SPRINGDOC_API_DOCS_ENABLED=false` e `SPRINGDOC_SWAGGER_UI_ENABLED=false`.
 
-Os controllers REST serão documentados automaticamente quando implementados.
-Como ainda não há endpoints de negócio, a interface inicialmente não lista
-operações de ativação. As entidades JPA não são expostas pela documentação.
+O controller de criação é documentado automaticamente, com os DTOs de entrada
+e saída. As entidades JPA não são expostas pela documentação.
 
 ## Testes e integração contínua
 
@@ -266,16 +534,66 @@ e ao health check. `TestcontainersConfiguration` disponibiliza PostgreSQL com a
 imagem `postgres:17-alpine`, sem depender do banco ou das credenciais locais.
 `RestClientWireMockTests` verifica uma chamada HTTP com `RestClient` e um
 servidor WireMock iniciado pelo próprio teste.
-`FlywayMigrationTests` verifica a aplicação e validação das migrações V1 e V2,
+`FlywayMigrationTests` verifica a aplicação e validação das migrações V1, V2 e V3,
 persistência dos campos públicos e internos, valores padrão, obrigatoriedade
 de proprietário não vazio, rejeição de contadores negativos, unicidade global
 de `external_id` entre consumidores e rejeição de status desconhecido no
 PostgreSQL real.
 `ActivationRequestTests` verifica criação, validações, encapsulamento e transições
-de estado. `ActivationRequestPersistenceTests` verifica o mapeamento completo
+de estado. `CreateActivationRequestTests` usa o validador Jakarta real para
+verificar obrigatoriedade (inclusive espaços Unicode), limites de 99/100/101
+unidades UTF-16 e preservação dos três identificadores na criação da entidade,
+sem banco ou contexto Spring.
+`ActivationDtosJsonTests` usa `@JsonTest` para verificar leitura/escrita do payload,
+preservação dos identificadores e serialização exclusiva dos sete campos públicos,
+incluindo os quatro status e datas UTC, sem depender de Docker.
+Também verifica a rejeição individual dos campos controlados pelo servidor
+no payload de criação.
+`ActivationRequestMapperTests` usa `@JsonTest` com o mapper gerado e descoberto
+como bean Spring para verificar a conversão nos quatro estados, preservação
+dos valores e ausência dos oito metadados internos no JSON mesmo quando
+preenchidos, além de entrada nula e datas anteriores à persistência, sem Docker.
+`ActivationRequestPersistenceTests` verifica o mapeamento completo
 contra as migrações no PostgreSQL, leitura dos quatro estados como texto,
 auditoria com relógio controlado e sessão SQL fora de UTC, preservação da data
 de criação e rejeição de gravação obsoleta entre dois contextos de persistência.
+`CreateActivationRequestEndpointTests` percorre HTTP, serviço, mapper e PostgreSQL
+real, sem transação de teste, para verificar commit, `PENDING`, proprietário
+autenticado, auditoria, `201`, `Location` e os sete campos públicos. Também verifica
+`400` sem inserção para campos inválidos/controlados pelo servidor, além de
+preservação da autenticação e da proteção CSRF.
+Os contratos HTTP também cobrem campos obrigatórios ausentes, corpo vazio ou
+JSON inválido, rejeição de propriedades desconhecidas e de todos os metadados
+controlados pelo servidor, inclusive timestamps válidos enviados pelo cliente.
+Os limites de 100 unidades UTF-16 são exercitados pela API com texto ASCII,
+espaços nas extremidades e caracteres suplementares, verificando os valores
+após persistência e consulta. A URI de `Location` é consultada após o `POST`, e
+os corpos da criação, consulta e listagem devem preservar os mesmos campos e
+timestamps UTC com precisão de microssegundos.
+Dois cenários adicionais protegem o contrato de criação: WireMock configurado
+com atraso e `503` recebe zero chamadas durante o `POST`; um advice exclusivo
+do teste simula o worker via SQL após o commit e antes da serialização,
+avançando a linha até `COMPLETED` e alterando `updatedAt`. O JSON continua em
+`PENDING`, com as datas originais. Essa simulação não implementa o worker nem
+usa esperas para coordenar a execução.
+
+`ListActivationRequestsEndpointTests` verifica paginação 0-based, padrões e limites,
+filtros isolados e combinados com AND, igualdade exata de `customerId`, os quatro
+status, parâmetros inválidos, páginas vazias e isolamento de conteúdo e totais
+entre consumidores. Também verifica os sete campos públicos e a ordenação
+`createdAt DESC, id DESC`, inclusive empates de data em páginas distintas, e a
+rejeição de paginação inválida em chamadas diretas ao serviço.
+Os testes incluem última página parcial com arredondamento de `totalPages`,
+parâmetros opcionais vazios, filtro de cliente no limite de tamanho e rejeição
+de filtros compostos somente por espaços Unicode. O parâmetro `sort` não pode
+alterar a ordem fixa. Os erros de parâmetros e de UUID verificam o contrato de
+Problem Details, incluindo o caminho da requisição. `GetActivationRequestEndpointTests`
+também verifica a consulta nos quatro estados e a conversão para UTC de datas
+persistidas com outro offset, preservando microssegundos e a diferença entre
+criação e atualização.
+`ActivationRequestQueryTests` captura o SQL real das quatro combinações de
+filtros e verifica o escopo de consumidor no conteúdo e na contagem, predicados
+apenas para filtros presentes e paginação/ordenação no banco.
 
 Também é possível executar a aplicação com o PostgreSQL do Testcontainers e o
 perfil `test` por meio de `TestAtivaflowApiApplication`:

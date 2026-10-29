@@ -6,7 +6,7 @@
 		<groupId>org.springframework.boot</groupId>
 		<artifactId>spring-boot-starter-parent</artifactId>
 		<version>3.5.16</version>
-		<relativePath/> <!-- lookup parent from repository -->
+		<relativePath/> <!-- Busca o POM pai no repositório -->
 	</parent>
 	<groupId>com.rensilver</groupId>
 	<artifactId>ativaflow-api</artifactId>
@@ -33,6 +33,12 @@
 		<springdoc.version>2.10.0</springdoc.version>
 	</properties>
 	<dependencies>
+		<dependency>
+			<groupId>com.google.code.findbugs</groupId>
+			<artifactId>jsr305</artifactId>
+			<version>3.0.2</version>
+			<scope>provided</scope>
+		</dependency>
 		<dependency>
 			<groupId>org.springframework.boot</groupId>
 			<artifactId>spring-boot-starter-actuator</artifactId>

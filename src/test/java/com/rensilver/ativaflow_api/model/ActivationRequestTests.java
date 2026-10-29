@@ -40,41 +40,42 @@ class ActivationRequestTests {
 	@Test
 	void providesProtectedNoArgConstructorAndNoPublicSetters() throws Exception {
 		assertThat(Modifier.isProtected(ActivationRequest.class.getDeclaredConstructor().getModifiers())).isTrue();
+		assertThat(ActivationRequest.class.getConstructors()).isEmpty();
 		assertThat(ActivationRequest.class.getMethods())
 				.noneMatch(method -> method.getName().startsWith("set"));
 	}
 
 	@ParameterizedTest
 	@NullAndEmptySource
-	@ValueSource(strings = {"   ", "\t\n"})
+	@ValueSource(strings = {"   ", "\t\n", "\u2003", "\u2003\t\n", "\u3000"})
 	void rejectsMissingOrBlankCreationFields(String invalid) {
-		assertThatThrownBy(() -> new ActivationRequest(invalid, "CUSTOMER-1", "PRODUCT-1", "consumer-a"))
+		assertThatThrownBy(() -> ActivationRequest.create(invalid, "CUSTOMER-1", "PRODUCT-1", "consumer-a"))
 				.isInstanceOf(IllegalArgumentException.class);
-		assertThatThrownBy(() -> new ActivationRequest("EXT-1", invalid, "PRODUCT-1", "consumer-a"))
+		assertThatThrownBy(() -> ActivationRequest.create("EXT-1", invalid, "PRODUCT-1", "consumer-a"))
 				.isInstanceOf(IllegalArgumentException.class);
-		assertThatThrownBy(() -> new ActivationRequest("EXT-1", "CUSTOMER-1", invalid, "consumer-a"))
+		assertThatThrownBy(() -> ActivationRequest.create("EXT-1", "CUSTOMER-1", invalid, "consumer-a"))
 				.isInstanceOf(IllegalArgumentException.class);
-		assertThatThrownBy(() -> new ActivationRequest("EXT-1", "CUSTOMER-1", "PRODUCT-1", invalid))
+		assertThatThrownBy(() -> ActivationRequest.create("EXT-1", "CUSTOMER-1", "PRODUCT-1", invalid))
 				.isInstanceOf(IllegalArgumentException.class);
 	}
 
 	@Test
 	void rejectsCreationFieldsLongerThanDatabaseColumns() {
 		String oversized = "a".repeat(101);
-		assertThatThrownBy(() -> new ActivationRequest(oversized, "CUSTOMER-1", "PRODUCT-1", "consumer-a"))
+		assertThatThrownBy(() -> ActivationRequest.create(oversized, "CUSTOMER-1", "PRODUCT-1", "consumer-a"))
 				.isInstanceOf(IllegalArgumentException.class);
-		assertThatThrownBy(() -> new ActivationRequest("EXT-1", oversized, "PRODUCT-1", "consumer-a"))
+		assertThatThrownBy(() -> ActivationRequest.create("EXT-1", oversized, "PRODUCT-1", "consumer-a"))
 				.isInstanceOf(IllegalArgumentException.class);
-		assertThatThrownBy(() -> new ActivationRequest("EXT-1", "CUSTOMER-1", oversized, "consumer-a"))
+		assertThatThrownBy(() -> ActivationRequest.create("EXT-1", "CUSTOMER-1", oversized, "consumer-a"))
 				.isInstanceOf(IllegalArgumentException.class);
-		assertThatThrownBy(() -> new ActivationRequest("EXT-1", "CUSTOMER-1", "PRODUCT-1", oversized))
+		assertThatThrownBy(() -> ActivationRequest.create("EXT-1", "CUSTOMER-1", "PRODUCT-1", oversized))
 				.isInstanceOf(IllegalArgumentException.class);
 	}
 
 	@Test
 	void acceptsColumnLimitWithoutNormalizingIdentifiers() {
 		String value = " " + "a".repeat(98) + " ";
-		ActivationRequest request = new ActivationRequest(value, value, value, value);
+		ActivationRequest request = ActivationRequest.create(value, value, value, value);
 
 		assertThat(request.getExternalId()).isEqualTo(value);
 		assertThat(request.getCustomerId()).isEqualTo(value);
@@ -113,7 +114,7 @@ class ActivationRequestTests {
 
 	@ParameterizedTest
 	@NullAndEmptySource
-	@ValueSource(strings = {"   ", "\t\n"})
+	@ValueSource(strings = {"   ", "\t\n", "\u2003", "\u2003\t\n", "\u3000"})
 	void rejectsMissingFailureCodeWithoutChangingState(String invalid) {
 		ActivationRequest request = newRequest();
 		request.startProcessing();
@@ -154,6 +155,6 @@ class ActivationRequestTests {
 	}
 
 	private ActivationRequest newRequest() {
-		return new ActivationRequest("EXT-1", "CUSTOMER-1", "PRODUCT-1", "consumer-a");
+		return ActivationRequest.create("EXT-1", "CUSTOMER-1", "PRODUCT-1", "consumer-a");
 	}
 }
