@@ -98,6 +98,34 @@ não alteram a identidade. O body de criação aceita somente `externalId`,
 `customerId` e `productCode`; tentativas de incluir `consumerId`, `consumer_id`,
 `owner`, `sub` ou `client_id` recebem `400`, sem escrita.
 
+## Respostas de autenticação e autorização
+
+`SecurityProblemHandler` implementa `AuthenticationEntryPoint` para falhas de
+autenticação e `AccessDeniedHandler` para acesso negado. `SecurityConfiguration`
+registra ambos em `exceptionHandling` e em `oauth2ResourceServer`, cobrindo os
+erros do filtro Bearer e da autorização. O advice MVC deixa essas exceções
+propagarem para a cadeia de segurança, que mantém a semântica OAuth.
+
+| Situação | Status | `WWW-Authenticate` | `detail` |
+| --- | --- | --- | --- |
+| Sem autenticação em recurso protegido | 401 | `Bearer` | `Authentication is required` |
+| JWT inválido ou expirado | 401 | `Bearer error="invalid_token"` | `Authentication is required` |
+| JWT autenticado com escopo insuficiente | 403 | Bearer com `error="insufficient_scope"` | `Access is denied` |
+| Falha de protocolo OAuth `invalid_request` | 400 | `Bearer error="invalid_request"` | `Invalid authentication request` |
+
+Os delegates nativos `BearerTokenAuthenticationEntryPoint` e
+`BearerTokenAccessDeniedHandler` definem o status e o desafio OAuth. Na
+autenticação, as descrições e URIs do erro original são removidas antes da
+delegação para evitar exposição de detalhes do decoder. O código OAuth e o
+status são preservados. O handler de autorização mantém os metadados padrão do
+Spring para `insufficient_scope`.
+
+O corpo usa `Content-Type: application/problem+json`, inclusive com
+`Accept: text/html`, e contém `type`, `title`, `status`, `detail`, `instance` e
+`correlationId`. O `instance` contém somente o caminho, sem query string, e a
+correlação corresponde ao header `X-Correlation-ID`. Não há redirecionamento
+para login nem mensagens internas de exceções na resposta.
+
 ## Execução local com PEM ou JWKS
 
 O [roteiro local](local-jwt.md) usa `scripts/LocalJwt.java` (Java 21) para
@@ -118,6 +146,19 @@ O servidor local publica somente o subdiretório `jwks/`, sem expor a chave priv
 ou o header Bearer.
 
 ## Verificação da segurança
+
+Para executar somente os testes unitários criados para a passagem de exceções
+do MVC aos handlers de segurança:
+
+```bash
+bash ./mvnw -Dtest=SecurityMvcProblemContractUnitTests test
+```
+
+Usam o advice, os handlers e o filtro de tradução de exceções reais em memória.
+Cobrem 401 por falha de autenticação ou acesso anônimo, 401 com `invalid_token`
+e 403 com `insufficient_scope`, nos formatos solicitados JSON, Problem JSON e
+HTML. Validam o corpo Problem Details completo, a correlação e a ausência de
+detalhes internos e redirecionamentos, sem iniciar Boot, banco, Docker ou rede.
 
 Para executar somente os testes unitários de identidade e propriedade:
 

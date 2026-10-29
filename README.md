@@ -723,8 +723,8 @@ cadeia Spring Security. `SecurityProblemHandler` implementa `AuthenticationEntry
 e `AccessDeniedHandler`, produzindo o mesmo contrato nos erros 401/403 dos filtros,
 inclusive quando o cliente solicita HTML. Uma requisição sem autenticação a um
 recurso protegido recebe 401 em vez de redirecionamento para login. A configuração
-usa JWT Bearer stateless; regras de escopo permanecem pendentes. Detalhes internos
-do decoder são removidos também do desafio `WWW-Authenticate`.
+usa JWT Bearer stateless, com os escopos `requests/read` e `requests/write`.
+Detalhes internos do decoder são removidos também do desafio `WWW-Authenticate`.
 
 `ApiExceptionHandlerUnitTests` exercita o contrato HTTP com MockMvc standalone,
 validação e serialização reais, sem Spring Boot, banco ou provedor externo:
