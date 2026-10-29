@@ -65,6 +65,42 @@ public interface ActivationRequestRepository extends JpaRepository<ActivationReq
 	int tryClaim(@Param("id") UUID id, @Param("expectedVersion") long expectedVersion,
 			@Param("workerId") String workerId, @Param("leaseMillis") long leaseMillis);
 
+	/** Libera apenas a posse vencida; nenhum resultado externo é inferido pela expiração. */
+	@Transactional(propagation = Propagation.MANDATORY)
+	@Modifying(clearAutomatically = true, flushAutomatically = true)
+	@Query(value = """
+			WITH expired AS (
+			    SELECT id, version FROM activation_requests
+			    WHERE status = 'PROCESSING' AND lease_until <= CURRENT_TIMESTAMP
+			    ORDER BY lease_until, id
+			    LIMIT :batchSize
+			    FOR UPDATE SKIP LOCKED
+			)
+			UPDATE activation_requests AS request
+			SET claimed_by = NULL, lease_until = NULL,
+			    version = request.version + 1, updated_at = CURRENT_TIMESTAMP
+			FROM expired
+			WHERE request.id = expired.id AND request.version = expired.version
+			  AND request.status = 'PROCESSING' AND request.lease_until <= CURRENT_TIMESTAMP
+			""", nativeQuery = true)
+	int releaseExpiredLeases(@Param("batchSize") int batchSize);
+
+	/** Registra a incerteza antes do HTTP, na mesma escrita que consome a tentativa. */
+	@Transactional(propagation = Propagation.MANDATORY)
+	@Modifying(clearAutomatically = true, flushAutomatically = true)
+	@Query(value = """
+			UPDATE activation_requests
+			SET attempt_count = attempt_count + 1, next_attempt_at = NULL,
+			    reconciliation_required = true, version = version + 1, updated_at = CURRENT_TIMESTAMP
+			WHERE id = :id AND version = :expectedVersion
+			  AND status = 'PROCESSING' AND claimed_by = :workerId
+			  AND lease_until > CURRENT_TIMESTAMP
+			  AND reconciliation_required = false AND attempt_count < 3
+			  AND (next_attempt_at <= CURRENT_TIMESTAMP OR (attempt_count = 0 AND next_attempt_at IS NULL))
+			""", nativeQuery = true)
+	int tryPrepareAttempt(@Param("id") UUID id, @Param("expectedVersion") long expectedVersion,
+			@Param("workerId") String workerId);
+
 	Optional<ActivationRequest> findByIdAndConsumerId(UUID id, String consumerId);
 
 	@Transactional(readOnly = true)

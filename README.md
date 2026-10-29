@@ -122,12 +122,13 @@ adiciona os campos internos abaixo, preservando a V1 e o contrato público:
 O contrato de uso desses campos está definido na
 [ADR-0001 — Metadados de processamento](docs/adr/0001-metadados-de-processamento.md),
 incluindo contagem antes do envio, próximo agendamento, validade do lease,
-proteção por versão e recuperação de resultado indeterminado. O futuro worker
-deverá ativar `reconciliation_required` preventivamente antes do HTTP e limpar
-a sinalização apenas ao persistir um resultado conhecido. Assim, uma queda entre
-envio e gravação do resultado não libera um reenvio automático. A ADR define
-o protocolo; a aquisição atômica está implementada conforme a seção de claim
-abaixo. Preparação do envio, HTTP e persistência do resultado ainda estão pendentes.
+proteção por versão e recuperação de resultado indeterminado. A preparação
+atômica implementada ativa `reconciliation_required` preventivamente antes do
+HTTP; o futuro processador só poderá limpar a sinalização ao persistir um
+resultado conhecido. Assim, uma queda entre envio e gravação do resultado não
+libera um reenvio automático. Claim, preparação e liberação de leases vencidos
+estão implementados conforme as seções abaixo. HTTP e persistência do resultado
+ainda estão pendentes.
 
 `consumer_id` é diferente de `customer_id`: o primeiro identifica o sistema
 consumidor autenticado; o segundo identifica o cliente informado no pedido.
@@ -139,8 +140,9 @@ aceito do payload. Os DTOs públicos aceitam apenas `externalId`,
 Nenhuma das oito colunas internas deverá ser exposta na API.
 
 O schema, a entidade JPA e os DTOs estão implementados e cobertos por testes.
-Scheduler, envio, agendamento de retries e reconciliação ainda estão pendentes.
-O claim já atribui leases e recupera somente trabalho comprovadamente seguro.
+Scheduler, chamada HTTP, agendamento de retries e reconciliação ainda estão pendentes.
+O claim atribui leases e recupera somente trabalho comprovadamente seguro;
+a preparação registra a tentativa antes do HTTP e a recuperação libera a posse vencida.
 Os campos opcionais começam nulos; a sinalização de reconciliação
 permitirá manter um resultado ambíguo em
 `PROCESSING`, sem adicionar estados públicos. O limite de tentativas será
@@ -239,14 +241,74 @@ Os testes de integração com PostgreSQL verificam essa interação entre JPA e
 SQL nativo, o descarte da candidata no contexto JPA e a preservação de estados
 terminais quando conclusão e falha disputam a mesma versão.
 
-Esta etapa não adiciona scheduler nem chama o provedor. O claim sozinho não
-autoriza HTTP: a preparação do envio e as futuras escritas devem aplicar as
-verificações de posse, versão e lease da ADR-0001. Resultados indeterminados,
+O claim sozinho não autoriza HTTP: a preparação descrita abaixo aplica as
+verificações de posse, versão e lease da ADR-0001. As futuras escritas de resultado
+também deverão aplicá-las. Resultados indeterminados,
 tentativas esgotadas, retries futuros e estados terminais não são adquiridos.
 Não há nova migração nesta etapa.
 
 Referências: [locks e SKIP LOCKED no PostgreSQL](https://www.postgresql.org/docs/17/sql-select.html#SQL-FOR-UPDATE-SHARE)
 e [atualizações diretas no Spring Data JPA](https://docs.spring.io/spring-data/jpa/reference/jpa/query-methods.html#jpa.modifying-queries).
+
+## Preparação da tentativa e recuperação de leases
+
+`ActivationRequestAttemptService.prepareAttempt(claim)` recebe a fotografia
+retornada pelo claim e executa uma atualização condicional em transação própria
+(`REQUIRES_NEW`). Exige ID, versão e worker correspondentes, status `PROCESSING`,
+lease válido (`lease_until > CURRENT_TIMESTAMP`), menos de três tentativas,
+ausência de reconciliação e primeiro envio ou retry seguro já vencido.
+
+Na mesma atualização, incrementa `attempt_count`, remove `next_attempt_at`,
+ativa `reconciliation_required`, incrementa `version` e atualiza `updated_at`.
+Preserva o lease, os dados da solicitação e o último erro. Somente após o commit
+o chamador recebe `Optional<PreparedActivationAttempt>`, contendo ID, nova
+versão, worker, vencimento e número da tentativa. Essa versão deve ser usada na
+futura persistência do resultado; a versão do claim anterior ficou obsoleta.
+Resultado vazio ou falha no commit impede iniciar HTTP. A mesma preparação não
+pode ser usada para autorizar outro envio, inclusive em chamadas concorrentes.
+O futuro worker deverá chamar o provedor fora de transação de banco e respeitar
+o vencimento da posse; a preparação não renova o lease.
+
+`ActivationRequestLeaseRecoveryService.recoverExpiredLeases(batchSize)` libera
+até `batchSize` claims vencidos de solicitações `PROCESSING` e retorna a quantidade
+liberada. O lote deve ser positivo. A operação usa uma transação própria curta e
+um único SQL com seleção por `lease_until ASC, id ASC`, `FOR UPDATE SKIP LOCKED`
+e atualização condicionada por ID, versão, status e vencimento. Leases válidos,
+linhas sem lease e estados diferentes de `PROCESSING` ficam intactos.
+
+O recuperador remove `claimed_by` e `lease_until` juntos, incrementa `version`
+e atualiza `updated_at`. Preserva status, tentativas, próximo agendamento, último
+erro e sinalização de reconciliação. Zero significa que nenhum claim foi liberado;
+não significa que não existam linhas bloqueadas por outra transação. A operação
+pode ser repetida e executada por múltiplas instâncias sem liberar duas vezes a
+mesma posse. O claim também pode retomar diretamente trabalho seguro vencido,
+sem depender de uma execução prévia do recuperador.
+
+| Situação quando o lease vence | Após liberar a posse | Novo envio automático? |
+| --- | --- | --- |
+| Claim inicial abandonado antes da preparação | Contador `0`, sem agendamento, reconciliação `false`. | Pode adquirir novo claim e preparar a primeira tentativa. |
+| Claim de retry seguro abandonado antes da preparação | Contador e agendamento seguro preservados. | Somente quando o agendamento vencer e houver tentativas disponíveis. |
+| Queda depois do commit da preparação, inclusive antes da conexão HTTP | Contador incrementado, sem agendamento, reconciliação `true`. | Bloqueado até evidência externa confiável. |
+| Timeout ou resposta externa desconhecida | Continua `PROCESSING` com reconciliação `true`, inclusive na terceira tentativa. | Bloqueado; expiração não comprova ausência de ativação. |
+| Contador positivo sem agendamento e sem sinalização | Metadados preservados, sem evidência de retry seguro. | Bloqueado; exige avaliação operacional. |
+
+O relógio do PostgreSQL decide a validade: no instante exato de `lease_until`,
+a posse já venceu e não pode preparar uma tentativa. Uma recuperação ou novo
+claim invalida o worker anterior pela versão, mesmo se o identificador do worker
+for reutilizado. A liberação nunca converte uma expiração em `FAILED`, zera o
+contador ou remove a proteção de reconciliação.
+
+Sem consulta externa ou idempotência garantida pelo provedor, as tentativas
+indeterminadas exigem intervenção operacional; não há reconciliação automática
+ou endpoint para liberar reenvios. No shutdown, deve-se deixar expirar a posse
+de uma tentativa autorizada sem apagar sua sinalização preventiva. Nenhuma dessas
+operações promete efeito externo exatamente uma vez.
+
+Os serviços são operações internas disponíveis para o futuro worker; esta etapa
+não adiciona scheduler, HTTP, renovação de lease nem gravação de resultado.
+Os métodos básicos da entidade (`complete()` e `fail()`) continuam sem implementar
+o protocolo de resultado e não devem ser usados diretamente pelo futuro worker.
+Os metadados continuam ausentes dos DTOs públicos, sem alteração dos quatro status.
 
 ## Contratos de entrada e saída
 
@@ -785,6 +847,17 @@ retry. Também exige zero linhas afetadas para versão obsoleta ou trabalho
 inelegível. `ActivationRequestClaimServiceTests` verifica que zero linhas não
 concede posse, que contagens inesperadas falham e que identificadores inválidos
 e leases sem duração positiva suficiente são rejeitados.
+
+`ActivationRequestLeaseRecoveryTests` verifica liberação de trabalho abandonado,
+preservação da ambiguidade e do retry seguro, limite e ordem do lote, concorrência
+entre recuperadores, linhas bloqueadas, commit independente, descarte da entidade
+gerenciada e igualdade no vencimento. `ActivationRequestAttemptTests` cobre a
+preparação atômica, retomada antes/depois dela, terceira tentativa, preparação
+concorrente, lease vencido/ausente, worker ou versão incorretos, retry futuro,
+reconciliação, estados terminais e commit independente. Os testes usam PostgreSQL
+real e simulam a passagem do tempo no banco, sem `sleep`. A suíte unitária
+`ActivationRequestAttemptServiceTests` verifica que zero linhas ou uma contagem
+inesperada nunca autoriza envio.
 
 Também é possível executar a aplicação com o PostgreSQL do Testcontainers e o
 perfil `test` por meio de `TestAtivaflowApiApplication`:

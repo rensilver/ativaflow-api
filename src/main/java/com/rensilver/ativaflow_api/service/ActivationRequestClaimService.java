@@ -27,7 +27,7 @@ public class ActivationRequestClaimService {
 		}
 	}
 
-	/** O claim não autoriza HTTP: a preparação do envio é uma etapa posterior da ADR-0001. */
+	/** O claim não autoriza HTTP: é necessário confirmar a preparação via ActivationRequestAttemptService. */
 	@Transactional(propagation = Propagation.REQUIRES_NEW)
 	public Optional<ClaimedActivationRequest> claimNext(@Nullable String workerId) {
 		if (workerId == null || workerId.isBlank() || workerId.length() > 100) {

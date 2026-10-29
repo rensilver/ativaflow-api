@@ -6,8 +6,8 @@ Data: 2026-10-29. Decisão: aceita para orientar a implementação do processame
 
 A tabela `activation_requests` já contém os metadados internos na migração V2,
 mapeados por `model.ActivationRequest`. Esta decisão define sua semântica e o
-protocolo que o worker deverá cumprir. O estado de implementação do claim e as
-etapas ainda pendentes estão descritos ao final desta decisão. A persistência
+protocolo que o worker deverá cumprir. As operações implementadas de claim,
+preparação e recuperação e as etapas pendentes estão descritas ao final desta decisão. A persistência
 existente ainda não garante o protocolo completo de envio.
 
 Os estados públicos continuam `PENDING`, `PROCESSING`, `COMPLETED` e `FAILED`.
@@ -103,11 +103,20 @@ JPA nem o incremento automático de `@Version`. Zero linhas atualizadas signific
 perda de posse; o worker antigo não pode sobrescrever dados nem iniciar novo HTTP.
 Uma resposta recebida após perder a posse também não autoriza gravação irrestrita.
 
-O recuperador pode retirar um claim vencido em atualização condicional pela
+O recuperador retira um claim vencido em atualização condicional pela
 versão e pelo vencimento, preservando contador, agendamento, erro e sinalização.
 Se a sinalização estiver ativa, a linha continua bloqueada para envio. Renovar
 lease não autoriza repetir uma tentativa; se uma chamada ainda estiver em curso,
 a sinalização preventiva impede outro worker de enviar novamente.
+
+A liberação abrange somente `PROCESSING` com lease não nulo e vencido, incluindo
+igualdade ao relógio do banco. Remove os dois campos de posse juntos e incrementa
+versão/auditoria. Não transforma expiração em falha nem presume ausência de efeito
+externo, mesmo quando o limite de tentativas foi atingido. Sem agendamento seguro,
+contador positivo e sinalização inativa também não autorizam retomada automática.
+Lotes positivos limitam o trabalho de cada transação; linhas bloqueadas são
+ignoradas e podem ser tratadas na próxima execução. O claim seguro também pode
+retomar diretamente uma posse vencida, sem liberação prévia.
 
 Reconciliação exige evidência confiável do resultado externo: ativação confirmada
 permite `COMPLETED`; falha permanente confirmada permite `FAILED`; não ativação
@@ -141,10 +150,28 @@ linhas bloqueadas, recuperação segura, igualdade no vencimento e isolamento
 da transação; `ActivationRequestClaimServiceTests` cobre o tratamento da contagem
 de linhas e a validação dos parâmetros.
 
-Preparação do envio, renovação, persistência de resultados, scheduler e
-reconciliação continuam pendentes. As demais relações entre colunas e o limite
-total de 3 tentativas na preparação do envio ainda não possuem enforcement completo no banco ou
-nos métodos da entidade. Os métodos atuais
+`ActivationRequestAttemptService.prepareAttempt` implementa a preparação por
+atualização condicional de ID, versão, status, worker, lease válido e elegibilidade.
+Incrementa o contador, remove o agendamento e ativa a proteção de reconciliação
+atomicamente, com incremento de versão/auditoria e preservação do último erro.
+A transação `REQUIRES_NEW` confirma antes de retornar `PreparedActivationAttempt`,
+com a nova versão e o número da tentativa. Zero linhas retorna vazio, sem autorizar
+HTTP; contagem inesperada reverte a transação. A preparação não renova o lease.
+
+`ActivationRequestLeaseRecoveryService.recoverExpiredLeases` libera a posse vencida
+em lotes, com CTE, `FOR UPDATE SKIP LOCKED` e atualização condicional na mesma
+transação própria curta. Preserva todos os metadados de segurança e retorna a
+quantidade liberada. Não possui agendamento automático nesta etapa.
+
+`ActivationRequestAttemptTests` e `ActivationRequestLeaseRecoveryTests` verificam
+a fronteira antes/depois da preparação, a retomada pelo mesmo worker, preservação
+da ambiguidade na terceira tentativa, limites de tempo, concorrência, linhas
+bloqueadas, preservação dos dados e commit independente em PostgreSQL real.
+`ActivationRequestAttemptServiceTests` cobre contagens de linhas sem autorização.
+
+HTTP, renovação, persistência de resultados, scheduler e reconciliação continuam
+pendentes. As demais relações entre colunas não possuem enforcement completo
+no banco ou nos métodos da entidade. Os métodos atuais
 `startProcessing()`, `complete()` e `fail()` cuidam das transições básicas;
 não implementam o protocolo de posse e envio desta decisão.
 
@@ -152,6 +179,6 @@ Os testes existentes `FlywayMigrationTests`, `ActivationRequestPersistenceTests`
 `ActivationRequestTests` e `ActivationRequestMapperTests` verificam schema,
 mapeamento, defaults, auditoria, lock otimista e isolamento dos campos públicos.
 Esses testes não comprovam o fluxo completo do worker. As próximas etapas
-deverão testar rejeição de worker antigo na preparação e no resultado,
-recuperação antes/depois da preparação, limite total, agendamento e ausência de
-reenvio automático em resultado indeterminado, com PostgreSQL real.
+deverão testar rejeição de worker antigo na gravação do resultado, cálculo e
+persistência de backoff, timeout real e ausência de reenvio em resultado
+indeterminado no fluxo HTTP completo, com PostgreSQL real.
