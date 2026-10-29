@@ -85,20 +85,22 @@ class ActivationRequestLeaseRecoveryTests {
 
 	@ParameterizedTest
 	@CsvSource({"1, true", "3, true", "1, false"})
-	void releasingLeaseNeverAuthorizesRetryOfUnknownExternalResult(int attempts, boolean reconciliation) {
+	void leavesExpiredLeaseInPlaceWhenAutomaticRecoveryIsUnsafe(int attempts, boolean reconciliation) {
 		UUID id = insert("PROCESSING", attempts, reconciliation, -1);
+		var before = jdbc.queryForMap("SELECT * FROM activation_requests WHERE id = ?", id);
 
-		assertThat(recovery.recoverExpiredLeases(10)).isEqualTo(1);
+		assertThat(recovery.recoverExpiredLeases(10)).isZero();
 
 		var stored = repository.findById(id).orElseThrow();
 		assertThat(stored.getStatus().name()).isEqualTo("PROCESSING");
-		assertThat(stored.getClaimedBy()).isNull();
-		assertThat(stored.getLeaseUntil()).isNull();
+		assertThat(stored.getClaimedBy()).isEqualTo("old-worker");
+		assertThat(stored.getLeaseUntil()).isNotNull();
 		assertThat(stored.getAttemptCount()).isEqualTo(attempts);
 		assertThat(stored.isReconciliationRequired()).isEqualTo(reconciliation);
 		assertThat(stored.getNextAttemptAt()).isNull();
 		assertThat(stored.getLastErrorCode()).isEqualTo("PROVIDER_TIMEOUT");
 		assertThat(claims.claimNext("replacement")).isEmpty();
+		assertThat(jdbc.queryForMap("SELECT * FROM activation_requests WHERE id = ?", id)).isEqualTo(before);
 	}
 
 	@ParameterizedTest
@@ -128,6 +130,18 @@ class ActivationRequestLeaseRecoveryTests {
 	}
 
 	@Test
+	void doesNotReleaseExpiredLeaseWhenRetryLimitWasReached() {
+		UUID id = insert("PROCESSING", 3, false, -1);
+		jdbc.update("UPDATE activation_requests SET next_attempt_at = CURRENT_TIMESTAMP - INTERVAL '1 minute' WHERE id = ?", id);
+		var before = jdbc.queryForMap("SELECT * FROM activation_requests WHERE id = ?", id);
+
+		assertThat(recovery.recoverExpiredLeases(10)).isZero();
+
+		assertThat(jdbc.queryForMap("SELECT * FROM activation_requests WHERE id = ?", id)).isEqualTo(before);
+		assertThat(claims.claimNext("replacement")).isEmpty();
+	}
+
+	@Test
 	void rejectsNonPositiveBatchSize() {
 		assertThatThrownBy(() -> recovery.recoverExpiredLeases(0)).isInstanceOf(IllegalArgumentException.class);
 		assertThatThrownBy(() -> recovery.recoverExpiredLeases(-1)).isInstanceOf(IllegalArgumentException.class);
@@ -142,16 +156,15 @@ class ActivationRequestLeaseRecoveryTests {
 		assertThat(recovery.recoverExpiredLeases(2)).isEqualTo(2);
 
 		assertThat(repository.findById(first).orElseThrow().getClaimedBy()).isNull();
-		assertThat(repository.findById(second).orElseThrow().getClaimedBy()).isNull();
-		assertThat(repository.findById(third).orElseThrow().getClaimedBy()).isEqualTo("old-worker");
-		assertThat(recovery.recoverExpiredLeases(2)).isEqualTo(1);
+		assertThat(repository.findById(second).orElseThrow().getClaimedBy()).isEqualTo("old-worker");
+		assertThat(repository.findById(third).orElseThrow().getClaimedBy()).isNull();
 		assertThat(recovery.recoverExpiredLeases(2)).isZero();
 	}
 
 	@Test
 	void skipsLockedLeaseWhileAnotherRecovererStillOwnsItsTransaction() {
 		UUID locked = insert("PROCESSING", 0, false, -30);
-		UUID available = insert("PROCESSING", 1, true, -20);
+		UUID available = insert("PROCESSING", 0, false, -20);
 
 		new TransactionTemplate(transactionManager).executeWithoutResult(transaction -> {
 			jdbc.queryForObject("SELECT id FROM activation_requests WHERE id = ? FOR UPDATE", UUID.class, locked);
@@ -170,7 +183,7 @@ class ActivationRequestLeaseRecoveryTests {
 	void concurrentRecoverersReleaseEachLeaseOnlyOnce() throws Exception {
 		var ids = new ArrayList<UUID>();
 		for (int i = 0; i < 12; i++) {
-			ids.add(insert("PROCESSING", i % 2, i % 2 == 1, -1));
+			ids.add(insert("PROCESSING", 0, false, -1));
 		}
 		var ready = new CountDownLatch(4);
 		var start = new CountDownLatch(1);
@@ -208,7 +221,7 @@ class ActivationRequestLeaseRecoveryTests {
 			jdbc.update("UPDATE activation_requests SET lease_until = CURRENT_TIMESTAMP WHERE id = ?", id);
 			var stale = repository.findById(id).orElseThrow();
 
-			assertThat(repository.releaseExpiredLeases(10)).isEqualTo(1);
+			assertThat(repository.releaseExpiredLeases(10, 3)).isEqualTo(1);
 			stale.complete();
 			repository.flush();
 

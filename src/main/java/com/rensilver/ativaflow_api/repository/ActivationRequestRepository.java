@@ -67,13 +67,18 @@ public interface ActivationRequestRepository extends JpaRepository<ActivationReq
 			@Param("workerId") String workerId, @Param("leaseMillis") long leaseMillis,
 			@Param("maxAttempts") int maxAttempts);
 
-	/** Libera apenas a posse vencida; nenhum resultado externo é inferido pela expiração. */
+	/** Libera somente leases vencidos cuja tentativa inicial ou retry pode ser retomado com segurança. */
 	@Transactional(propagation = Propagation.MANDATORY)
 	@Modifying(clearAutomatically = true, flushAutomatically = true)
 	@Query(value = """
 			WITH expired AS (
 			    SELECT id, version FROM activation_requests
 			    WHERE status = 'PROCESSING' AND lease_until <= CURRENT_TIMESTAMP
+			      AND reconciliation_required = false AND attempt_count < :maxAttempts
+			      AND (
+			          (attempt_count = 0 AND next_attempt_at IS NULL)
+			          OR next_attempt_at <= CURRENT_TIMESTAMP
+			      )
 			    ORDER BY lease_until, id
 			    LIMIT :batchSize
 			    FOR UPDATE SKIP LOCKED
@@ -85,7 +90,7 @@ public interface ActivationRequestRepository extends JpaRepository<ActivationReq
 			WHERE request.id = expired.id AND request.version = expired.version
 			  AND request.status = 'PROCESSING' AND request.lease_until <= CURRENT_TIMESTAMP
 			""", nativeQuery = true)
-	int releaseExpiredLeases(@Param("batchSize") int batchSize);
+	int releaseExpiredLeases(@Param("batchSize") int batchSize, @Param("maxAttempts") int maxAttempts);
 
 	/** Registra a incerteza antes do HTTP, na mesma escrita que consome a tentativa. */
 	@Transactional(propagation = Propagation.MANDATORY)

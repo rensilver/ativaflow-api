@@ -1,5 +1,6 @@
 package com.rensilver.ativaflow_api.service;
 
+import com.rensilver.ativaflow_api.config.ActivationRetryProperties;
 import com.rensilver.ativaflow_api.repository.ActivationRequestRepository;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Propagation;
@@ -10,9 +11,12 @@ import org.springframework.transaction.annotation.Transactional;
 public class ActivationRequestLeaseRecoveryService {
 
 	private final ActivationRequestRepository repository;
+	private final int maxAttempts;
 
-	public ActivationRequestLeaseRecoveryService(ActivationRequestRepository repository) {
+	public ActivationRequestLeaseRecoveryService(ActivationRequestRepository repository,
+			ActivationRetryProperties retryProperties) {
 		this.repository = repository;
+		this.maxAttempts = retryProperties.maxAttempts();
 	}
 
 	/** Retorna a quantidade liberada em um lote curto, confirmado independentemente do chamador. */
@@ -21,6 +25,6 @@ public class ActivationRequestLeaseRecoveryService {
 		if (batchSize < 1) {
 			throw new IllegalArgumentException("Recovery batch size must be positive");
 		}
-		return repository.releaseExpiredLeases(batchSize);
+		return repository.releaseExpiredLeases(batchSize, maxAttempts);
 	}
 }
