@@ -6,7 +6,8 @@ migrações, entidade JPA com transições de estado, auditoria e controle otimi
 e DTOs públicos como records com Bean Validation na entrada, além da criação
 de solicitações por `POST /api/v1/requests` e consulta por `GET /api/v1/requests/{id}`.
 Os pacotes de aplicação possuem suas responsabilidades descritas em
-`package-info.java`; listagem e integração com o provedor ainda estão pendentes.
+`package-info.java`; o cliente HTTP do provedor está implementado, e o worker
+que o acionará continua pendente.
 
 ## Tecnologias e dependências
 
@@ -384,8 +385,14 @@ integração. `Indeterminate` exige reconciliação e não autoriza reenvio auto
 Cada chamada representa uma única tentativa, fora de transação de banco;
 persistência, limite de tentativas e agendamento continuam a cargo da aplicação.
 
-Cliente HTTP, classificação de respostas, metadados de correlação, mappings
-WireMock e worker continuam pendentes.
+`HttpActivationProviderClient` implementa a porta com `RestClient` e é registrado
+por `ActivationProviderConfiguration`. `ActivationProviderProperties` vincula
+`app.activation-provider.base-url` e rejeita destinos sem esquema HTTP(S)/host,
+com credenciais, query ou fragmento. Um prefixo de caminho na URL base é preservado.
+O builder configurado pelo Spring Boot é utilizado com transporte JDK e HTTP/1.1
+explícitos, sem redirecionamentos automáticos. O cliente executa uma única
+tentativa e não persiste nem altera estados. Metadados de correlação, mappings WireMock para
+demonstração e worker continuam pendentes.
 
 A chamada envia `Content-Type: application/json` e apenas os três valores
 persistidos, sem normalização:
@@ -413,6 +420,16 @@ A garantia do mock não se transfere a um provedor real ao mudar a URL base.
 `externalId` não garante idempotência externa. O mock não exige autenticação;
 o mecanismo real precisa ser contratado, e o JWT do consumidor não é encaminhado.
 A ADR detalha campos, headers, `Retry-After`, limites e critérios futuros de teste.
+
+O cliente traduz essa matriz para `ProviderOutcome`, com códigos internos
+`PROVIDER_REJECTED`, `PROVIDER_TEMPORARILY_UNAVAILABLE`,
+`PROVIDER_UNCONFIRMED_RESPONSE` e `PROVIDER_COMMUNICATION_FAILURE`.
+Os corpos de resposta são ignorados. Em falhas transitórias contratadas,
+`Retry-After` aceita segundos inteiros não negativos e data HTTP RFC 1123;
+valores inválidos ou datas passadas produzem `Optional.empty()`. Um prazo futuro
+válido é preservado, mesmo acima do teto de backoff. Overflow na representação
+do prazo produz `Indeterminate(PROVIDER_RETRY_AFTER_OUT_OF_RANGE)`.
+O agendamento e a persistência desses resultados continuam a cargo da aplicação.
 
 ## Contratos de entrada e saída
 
@@ -837,8 +854,10 @@ Nenhum perfil é ativado automaticamente. A seleção é feita por
 
 Os timeouts HTTP e de desligamento aceitam unidades como `500ms`, `2s` e `1m`.
 O timeout do HikariCP é informado como inteiro em milissegundos. A URL e a chave
-do provedor estão declaradas em `app.activation-provider`; o cliente dessa
-integração ainda não está implementado.
+reservada do provedor estão declaradas em `app.activation-provider`.
+O cliente utiliza os timeouts de `spring.http.client`, exigindo valores entre
+`1ms` e `2147483647ms`, e desabilita redirecionamentos. A chave reservada não é
+enviada, pois o contrato simulado não define autenticação.
 
 ## Execução local
 
@@ -916,6 +935,11 @@ e ao health check. `TestcontainersConfiguration` disponibiliza PostgreSQL com a
 imagem `postgres:17-alpine`, sem depender do banco ou das credenciais locais.
 `RestClientWireMockTests` verifica uma chamada HTTP com `RestClient` e um
 servidor WireMock iniciado pelo próprio teste.
+`HttpActivationProviderClientTests` verifica o cliente real com WireMock em porta
+dinâmica: URL com prefixo, payload exato com Unicode e espaços, classificação de
+respostas, `Retry-After`, timeout de leitura, falha de conexão e ausência de retry
+ou redirecionamento automático. Também verifica rejeição de configuração inválida
+na inicialização, sem exigir banco ou Compose.
 `FlywayMigrationTests` verifica a aplicação e validação das migrações V1, V2 e V3,
 persistência dos campos públicos e internos, valores padrão, obrigatoriedade
 de proprietário não vazio, rejeição de contadores negativos e rejeição de status
