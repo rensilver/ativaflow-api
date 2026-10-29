@@ -714,6 +714,17 @@ correlação entre corpo, header e log. Para executar somente os testes dessa ta
 bash ./mvnw -Dtest=ValidationProblemContractUnitTests test
 ```
 
+`SafeErrorResponsesUnitTests` cobre 400 (payload inválido), 404 (não encontrado),
+409 (conflito) e 500 (falha inesperada) nos endpoints com MockMvc standalone.
+Os dez cenários verificam mensagens públicas seguras, campos permitidos do
+Problem Details e correlação, sem expor payload, query string, SQL, credenciais,
+dados de outro consumidor, causas ou stack traces. Incluem exceções com mensagem
+interna sensível e falha inesperada sem mensagem. Para executar somente essa suíte:
+
+```bash
+bash ./mvnw -Dtest=SafeErrorResponsesUnitTests test
+```
+
 Os testes adicionados para a padronização exercitam negociação de conteúdo,
 status padrão e não padronizados, e os filtros de autenticação, autorização e
 CSRF em memória. Para executar somente esses testes, sem Spring Boot ou banco:
