@@ -6,7 +6,8 @@ migrações, entidade JPA com transições de estado, auditoria e controle otimi
 e DTOs públicos como records com Bean Validation na entrada, além da criação
 de solicitações por `POST /api/v1/requests` e consulta por `GET /api/v1/requests/{id}`.
 Os pacotes de aplicação possuem suas responsabilidades descritas em
-`package-info.java`; listagem e integração com o provedor ainda estão pendentes.
+`package-info.java`; o cliente HTTP do provedor está implementado, e o worker
+que o acionará continua pendente.
 
 ## Tecnologias e dependências
 
@@ -68,6 +69,8 @@ de serviços está em [Responsabilidades dos serviços](docs/service-responsibil
 | `src/main/resources/application-prod.yaml` | Configuração por variáveis de ambiente e desativação do DevTools em produção. |
 | `src/test/resources/application-test.yaml` | Configuração do provedor para o perfil de testes. |
 | `.env.example` | Modelo de variáveis para execução local. |
+| `docker-compose.yaml` | Provedor simulado local com a imagem oficial do WireMock. |
+| `infra/wiremock/mappings/activation-success.json` | Mapping estático de sucesso: `POST /provider/v1/activate` retorna `204`, sem corpo. |
 | `.github/workflows/ci.yaml` | Build e testes no GitHub Actions. |
 | `.gitignore` | Exclusões de build, arquivos de IDE e configurações locais de ambiente. |
 | `.gitattributes` | Padronização de finais de linha dos scripts do Maven Wrapper. |
@@ -151,7 +154,7 @@ a preparação registra a tentativa antes do HTTP e a recuperação libera a pos
 Os campos opcionais começam nulos; a sinalização de reconciliação
 permitirá manter um resultado ambíguo em
 `PROCESSING`, sem adicionar estados públicos. Claim, preparação e gravação de
-resultado aplicam o limite de três tentativas; a constraint do banco impede somente contagens
+resultado aplicam o limite configurado de até três tentativas totais; a constraint do banco impede somente contagens
 negativas. A unicidade de `external_id` continua global, inclusive entre
 consumidores. Os índices de listagem estão na V3; índices específicos para claim
 ainda não foram adicionados e dependerão da avaliação do plano e do volume de trabalho.
@@ -197,9 +200,9 @@ de desenvolvimento. Não há proprietário padrão nem backfill inferido de
 `consumer_id NOT NULL` falhará: será necessário planejar a atribuição dos
 proprietários antes de aplicar essa migração a um banco com dados.
 
-Os diretórios `infra/wiremock/mappings/` e `infra/wiremock/__files/` também estão
-preparados, sem conteúdo além dos arquivos `.gitkeep`. As decisões técnicas
-estão em `docs/adr/`.
+O diretório `infra/wiremock/mappings/` contém o mapping padrão de sucesso do
+provedor simulado. `infra/wiremock/__files/` está reservado para arquivos de
+resposta, caso necessários. As decisões técnicas estão em `docs/adr/`.
 
 ## Aquisição atômica pelo worker
 
@@ -328,7 +331,7 @@ incrementa `version` e atualiza `updated_at`.
 | --- | --- |
 | `recordSuccess(attempt)` | `COMPLETED`, sem agendamento ou último erro. |
 | `recordPermanentFailure(attempt, errorCode)` | `FAILED`, sem agendamento, com código categorizado. |
-| `recordSafeTransientFailure(attempt, errorCode, retryAfter)` | Antes da terceira tentativa, `PROCESSING` com próximo instante futuro e erro; na terceira, `FAILED` sem agendamento. |
+| `recordSafeTransientFailure(attempt, errorCode, retryAfter)` | Antes do limite configurado, `PROCESSING` com próximo instante futuro e erro; ao atingir o limite, `FAILED` sem agendamento. |
 
 As operações retornam `true` após o commit; `false` significa que nenhuma linha
 foi alterada, por exemplo por perda de posse ou resultado já registrado. Contagem
@@ -345,9 +348,17 @@ três tentativas, esse teto não chega a ser atingido.
 
 | Variável | Padrão | Validação |
 | --- | --- | --- |
+| `WORKER_RETRY_MAX_ATTEMPTS` | `3` | Inteiro de 1 a 3; inclui a primeira tentativa. `1` desabilita reenvios. |
 | `WORKER_RETRY_INITIAL_DELAY` | `1s` | Pelo menos 1 ms. |
 | `WORKER_RETRY_MAX_DELAY` | `1m` | Maior ou igual ao atraso inicial. |
 | `WORKER_RETRY_JITTER_RATIO` | `0.25` | Número finito entre 0 e 1; zero desabilita jitter. |
+
+`ActivationRetryProperties` usa `@ConfigurationProperties("app.worker.retry")`
+e `@Validated`. Valores inválidos, atraso máximo menor que o inicial e overflow
+na representação em milissegundos ou na soma com jitter impedem a inicialização.
+O mesmo limite é aplicado à seleção de candidatos, ao claim condicional, à
+preparação de tentativas e ao registro de falhas seguras. Resultados ambíguos
+continuam bloqueados para reconciliação, inclusive na última tentativa configurada.
 
 O PostgreSQL persiste `next_attempt_at = max(CURRENT_TIMESTAMP + atraso, retryAfter)`.
 `retryAfter` é um `Instant` opcional já interpretado pela futura integração HTTP;
@@ -362,6 +373,79 @@ HTTP 500/503, timeout ou `Retry-After` isoladamente não fornecem essa garantia;
 sem ela, o chamador deve registrar resultado ambíguo e manter o bloqueio.
 A classificação de respostas e a interpretação do header continuam no escopo
 da futura integração HTTP. Nenhuma operação adiciona endpoint público.
+
+## Contrato mínimo de integração com o provedor
+
+O contrato de saída de `POST /provider/v1/activate` está definido na
+[ADR-0002 — Contrato mínimo de ativação no provedor](docs/adr/0002-contrato-minimo-provedor.md).
+O enunciado não fornece schema completo e não existe contrato oficial adicional;
+as decisões abaixo são suposições confirmadas para o projeto e seu mock.
+O contrato Java está disponível em `client.provider.ActivationProviderClient`,
+com a operação `ProviderOutcome activate(ActivationProviderRequest request)`.
+`ActivationProviderRequest`, em `client.provider.dto`, contém somente os três
+campos de negócio, recebidos já validados e preservados sem normalização.
+Interface e modelos usam apenas Java e tipos próprios, sem dependências de
+HTTP, Spring, entidade JPA ou DTOs públicos.
+
+`domain.ProviderOutcome` representa quatro resultados tipados: `Success`,
+`PermanentFailure`, `TransientFailure` e `Indeterminate`. Falhas carregam apenas
+um código interno categorizado. `TransientFailure` exige garantia contratual de
+não ativação e pode informar `Optional<Instant> retryAfter`, já interpretado pela
+integração. `Indeterminate` exige reconciliação e não autoriza reenvio automático.
+Os construtores das variantes de falha rejeitam códigos nulos, em branco segundo
+`String.isBlank()` ou maiores que 100 unidades UTF-16 com `IllegalArgumentException`.
+`TransientFailure` também rejeita `retryAfter` nulo: a ausência deve ser representada
+por `Optional.empty()`. Códigos válidos e a precisão do instante são preservados,
+sem normalização; a integração continua responsável por interpretar `Retry-After`.
+Cada chamada representa uma única tentativa, fora de transação de banco;
+persistência, limite de tentativas e agendamento continuam a cargo da aplicação.
+
+`HttpActivationProviderClient` implementa a porta com `RestClient` e é registrado
+por `ActivationProviderConfiguration`. `ActivationProviderProperties` vincula
+`app.activation-provider.base-url` e rejeita destinos sem esquema HTTP(S)/host,
+com credenciais, query ou fragmento. Um prefixo de caminho na URL base é preservado.
+O builder configurado pelo Spring Boot é utilizado com transporte JDK e HTTP/1.1
+explícitos, sem redirecionamentos automáticos. O cliente executa uma única
+tentativa e não persiste nem altera estados. O mapping WireMock de sucesso está
+disponível no Compose para demonstração local. Metadados de correlação e worker
+continuam pendentes.
+
+A chamada envia `Content-Type: application/json` e apenas os três valores
+persistidos, sem normalização:
+
+```json
+{
+  "externalId": "EXT-12345",
+  "customerId": "CUST-10001",
+  "productCode": "INTERNET-500"
+}
+```
+
+O sucesso padrão é **`204 No Content`, sem corpo**, confirmando ativação concluída.
+Nenhum campo de resposta é obrigatório; não há schema de erro presumido.
+
+| Cenário | Tratamento definido para a futura integração |
+| --- | --- |
+| `204` (padrão), `200` ou `201` | Confirmam conclusão no contrato simulado: `COMPLETED`, sem retry; corpo dispensável. |
+| `202 Accepted` | Não confirma conclusão; `PROCESSING` com reconciliação, sem reenvio automático. |
+| `400` | No mock, rejeição permanente sem ativação: `FAILED`, sem retry. |
+| `500`, `429` ou `503` | **Somente no contrato do mock**, garantem não ativação: até três tentativas totais, com backoff, jitter e `Retry-After` válido; terceira falha segura encerra em `FAILED`. |
+| Timeout, resposta não contratada ou erro sem garantia de não ativação | `PROCESSING` com reconciliação, sem retry automático. |
+
+A garantia do mock não se transfere a um provedor real ao mudar a URL base.
+`externalId` não garante idempotência externa. O mock não exige autenticação;
+o mecanismo real precisa ser contratado, e o JWT do consumidor não é encaminhado.
+A ADR detalha campos, headers, `Retry-After`, limites e critérios futuros de teste.
+
+O cliente traduz essa matriz para `ProviderOutcome`, com códigos internos
+`PROVIDER_REJECTED`, `PROVIDER_TEMPORARILY_UNAVAILABLE`,
+`PROVIDER_UNCONFIRMED_RESPONSE` e `PROVIDER_COMMUNICATION_FAILURE`.
+Os corpos de resposta são ignorados. Em falhas transitórias contratadas,
+`Retry-After` aceita segundos inteiros não negativos e data HTTP RFC 1123;
+valores inválidos ou datas passadas produzem `Optional.empty()`. Um prazo futuro
+válido é preservado, mesmo acima do teto de backoff. Overflow na representação
+do prazo produz `Indeterminate(PROVIDER_RETRY_AFTER_OUT_OF_RANGE)`.
+O agendamento e a persistência desses resultados continuam a cargo da aplicação.
 
 ## Contratos de entrada e saída
 
@@ -785,9 +869,12 @@ Nenhum perfil é ativado automaticamente. A seleção é feita por
 | `SHUTDOWN_TIMEOUT` | `30s`, limite por fase do desligamento gracioso. |
 
 Os timeouts HTTP e de desligamento aceitam unidades como `500ms`, `2s` e `1m`.
-O timeout do HikariCP é informado como inteiro em milissegundos. A URL e a chave
-do provedor estão declaradas em `app.activation-provider`; o cliente dessa
-integração ainda não está implementado.
+O timeout do HikariCP é informado como inteiro em milissegundos. Os timeouts, a URL
+e a chave reservada do provedor estão declarados em `app.activation-provider`.
+`ActivationProviderProperties` usa `@ConfigurationProperties` e `@Validated`.
+O cliente utiliza `connect-timeout` e `read-timeout` desse prefixo, exigindo valores entre
+`1ms` e `2147483647ms`, e desabilita redirecionamentos. A chave reservada não é
+enviada, pois o contrato simulado não define autenticação.
 
 ## Execução local
 
@@ -812,6 +899,50 @@ bash ./mvnw spring-boot:run
 ```
 
 Os arquivos `.env` locais são ignorados pelo Git; `.env.example` é versionado.
+
+### Provedor simulado no Compose
+
+Com Docker Engine e Docker Compose disponíveis, execute na raiz do repositório:
+
+```bash
+docker compose up -d activation-provider-mock
+docker compose ps activation-provider-mock
+```
+
+O serviço usa a imagem oficial `wiremock/wiremock:3.13.2`, com versão fixa e
+diretórios `mappings` e `__files` montados somente para leitura, conforme a
+[documentação do WireMock](https://wiremock.org/docs/standalone/docker/).
+A porta é publicada apenas em `127.0.0.1:8081`, restringindo o acesso externo
+ao mock e à sua API administrativa.
+
+Para a API executada na máquina com o perfil `local`, mantenha
+`ACTIVATION_PROVIDER_BASE_URL=http://localhost:8081`, como em `.env.example`.
+Outros containers na mesma rede do Compose devem usar
+`http://activation-provider-mock:8080`. Nesta etapa, o Compose contém apenas o
+mock; a aplicação e o PostgreSQL continuam com a execução local descrita acima.
+
+Após a inicialização do WireMock, confira diretamente o contrato simulado:
+
+```bash
+curl -i --request POST 'http://localhost:8081/provider/v1/activate' \
+  --header 'Content-Type: application/json' \
+  --data '{"externalId":"EXT-12345","customerId":"CUST-10001","productCode":"INTERNET-500"}'
+```
+
+O retorno esperado é `204 No Content`, sem corpo. O único mapping padrão é
+`infra/wiremock/mappings/activation-success.json`; não há seletor de cenários na
+API. Erros e timeouts são configurados pelo próprio WireMock dos testes, em
+instâncias isoladas com portas dinâmicas, sem depender deste container.
+O worker ainda está pendente; criar uma solicitação na API não chama o mock.
+
+Após editar um mapping, reinicie o serviço para recarregá-lo. Para consultar
+logs ou encerrar o ambiente:
+
+```bash
+docker compose restart activation-provider-mock
+docker compose logs --tail=100 activation-provider-mock
+docker compose down
+```
 
 ## Documentação OpenAPI e Swagger UI
 
@@ -865,6 +996,11 @@ e ao health check. `TestcontainersConfiguration` disponibiliza PostgreSQL com a
 imagem `postgres:17-alpine`, sem depender do banco ou das credenciais locais.
 `RestClientWireMockTests` verifica uma chamada HTTP com `RestClient` e um
 servidor WireMock iniciado pelo próprio teste.
+`HttpActivationProviderClientTests` verifica o cliente real com WireMock em porta
+dinâmica: URL com prefixo, payload exato com Unicode e espaços, classificação de
+respostas, `Retry-After`, timeout de leitura, falha de conexão e ausência de retry
+ou redirecionamento automático. Também verifica rejeição de configuração inválida
+na inicialização, sem exigir banco ou Compose.
 `FlywayMigrationTests` verifica a aplicação e validação das migrações V1, V2 e V3,
 persistência dos campos públicos e internos, valores padrão, obrigatoriedade
 de proprietário não vazio, rejeição de contadores negativos e rejeição de status

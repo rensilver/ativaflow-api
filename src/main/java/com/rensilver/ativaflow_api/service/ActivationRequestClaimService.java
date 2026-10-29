@@ -4,9 +4,11 @@ import java.time.Duration;
 import java.util.Objects;
 import java.util.Optional;
 
+import com.rensilver.ativaflow_api.config.ActivationRetryProperties;
 import com.rensilver.ativaflow_api.repository.ActivationRequestRepository;
 import com.rensilver.ativaflow_api.service.model.ClaimedActivationRequest;
 import org.springframework.beans.factory.annotation.Value;
+import org.springframework.boot.context.properties.EnableConfigurationProperties;
 import org.springframework.lang.Nullable;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Propagation;
@@ -14,14 +16,17 @@ import org.springframework.transaction.annotation.Transactional;
 
 /** Adquire uma solicitação por transação; o retorno só é entregue após o commit pelo proxy Spring. */
 @Service
+@EnableConfigurationProperties(ActivationRetryProperties.class)
 public class ActivationRequestClaimService {
 
 	private final ActivationRequestRepository repository;
 	private final long leaseMillis;
+	private final int maxAttempts;
 
 	public ActivationRequestClaimService(ActivationRequestRepository repository,
-			@Value("${app.worker.lease-duration:30s}") Duration leaseDuration) {
+			@Value("${app.worker.lease-duration:30s}") Duration leaseDuration, ActivationRetryProperties retryProperties) {
 		this.repository = repository;
+		this.maxAttempts = retryProperties.maxAttempts();
 		this.leaseMillis = leaseDuration.toMillis();
 		if (leaseMillis < 1) {
 			throw new IllegalArgumentException("Lease duration must be at least one millisecond");
@@ -34,13 +39,13 @@ public class ActivationRequestClaimService {
 		if (workerId == null || workerId.isBlank() || workerId.length() > 100) {
 			throw new IllegalArgumentException("Worker id must contain non-blank text of at most 100 characters");
 		}
-		var candidate = repository.findNextClaimCandidate();
+		var candidate = repository.findNextClaimCandidate(maxAttempts);
 		if (candidate.isEmpty()) {
 			return Optional.empty();
 		}
 		var request = candidate.orElseThrow();
 		int affectedRows = repository.tryClaim(request.getId(), Objects.requireNonNull(request.getVersion()),
-				workerId, leaseMillis);
+				workerId, leaseMillis, maxAttempts);
 		if (affectedRows == 0) {
 			return Optional.empty();
 		}

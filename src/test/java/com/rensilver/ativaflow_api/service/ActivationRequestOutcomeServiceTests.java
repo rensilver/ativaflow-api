@@ -4,6 +4,7 @@ import java.time.Duration;
 import java.time.Instant;
 import java.util.UUID;
 
+import com.rensilver.ativaflow_api.config.ActivationRetryProperties;
 import com.rensilver.ativaflow_api.repository.ActivationRequestRepository;
 import com.rensilver.ativaflow_api.service.model.PreparedActivationAttempt;
 import com.rensilver.ativaflow_api.service.policy.ActivationRetryPolicy;
@@ -36,7 +37,7 @@ class ActivationRequestOutcomeServiceTests {
 	void unexpectedUpdatedRowsFailsInsteadOfReportingSuccess(int count) {
 		var attempt = attempt();
 		when(repository.tryRecordConfirmedOutcome(attempt.id(), 2, "worker-a", 1,
-				true, false, null, 0, null)).thenReturn(count);
+				true, false, null, 0, null, 3)).thenReturn(count);
 		assertThatThrownBy(() -> service().recordSuccess(attempt)).isInstanceOf(IllegalStateException.class);
 	}
 
@@ -58,7 +59,7 @@ class ActivationRequestOutcomeServiceTests {
 
 	private ActivationRequestOutcomeService service() {
 		return new ActivationRequestOutcomeService(repository,
-				new ActivationRetryPolicy(Duration.ofSeconds(1), Duration.ofMinutes(1), 0));
+				new ActivationRetryPolicy(new ActivationRetryProperties(3, Duration.ofSeconds(1), Duration.ofMinutes(1), 0)));
 	}
 
 	private PreparedActivationAttempt attempt() {

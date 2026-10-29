@@ -1,0 +1,8 @@
+services:
+  activation-provider-mock:
+    image: wiremock/wiremock:3.13.2
+    ports:
+      - "127.0.0.1:8081:8080"
+    volumes:
+      - ./infra/wiremock/mappings:/home/wiremock/mappings:ro
+      - ./infra/wiremock/__files:/home/wiremock/__files:ro

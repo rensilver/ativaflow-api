@@ -48,7 +48,7 @@ public class ActivationRequestOutcomeService {
 	private boolean record(PreparedActivationAttempt attempt, boolean success, boolean retryable,
 			@Nullable String errorCode, long delayMillis, @Nullable Instant retryAfter) {
 		int affectedRows = repository.tryRecordConfirmedOutcome(attempt.id(), attempt.version(), attempt.claimedBy(),
-				attempt.attemptCount(), success, retryable, errorCode, delayMillis, retryAfter);
+				attempt.attemptCount(), success, retryable, errorCode, delayMillis, retryAfter, retryPolicy.maxAttempts());
 		if (affectedRows == 0) {
 			return false;
 		}

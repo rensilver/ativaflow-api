@@ -227,14 +227,14 @@ class ActivationRequestAttemptTests {
 		var claim = claims.claimNext("worker-a").orElseThrow();
 		new TransactionTemplate(transactionManager).executeWithoutResult(transaction -> {
 			jdbc.update("UPDATE activation_requests SET lease_until = CURRENT_TIMESTAMP WHERE id = ?", id);
-			assertThat(repository.tryPrepareAttempt(id, claim.version(), "worker-a")).isZero();
+			assertThat(repository.tryPrepareAttempt(id, claim.version(), "worker-a", 3)).isZero();
 			jdbc.update("""
 					UPDATE activation_requests SET lease_until = CURRENT_TIMESTAMP + INTERVAL '1 minute',
 					    next_attempt_at = CURRENT_TIMESTAMP, attempt_count = 2 WHERE id = ?
 					""", id);
 			var stale = repository.findById(id).orElseThrow();
 
-			assertThat(repository.tryPrepareAttempt(id, claim.version(), "worker-a")).isEqualTo(1);
+			assertThat(repository.tryPrepareAttempt(id, claim.version(), "worker-a", 3)).isEqualTo(1);
 			stale.complete();
 			repository.flush();
 
