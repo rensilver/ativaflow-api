@@ -1278,6 +1278,11 @@ Os contratos de emissores externos dependem das próximas etapas.
 
 Veja [Configuração JWT e demonstração local](docs/resource-server.md) para variáveis
 de ambiente, JWKS, audience e geração de chave/token efêmeros fora do repositório.
+O guia também documenta o [fluxo M2M / Client Credentials](docs/resource-server.md#fluxo-m2m--client-credentials),
+a matriz de autorização e a [origem e rotação de segredos](docs/resource-server.md#origem-custódia-e-rotação-de-segredos).
+Emissor e cofre de produção ainda não estão definidos; os procedimentos são
+independentes de fornecedor e não exigem Cognito/AWS. O utilitário local gera
+JWTs diretamente e não implementa um token endpoint OAuth.
 O [roteiro executável de PEM/JWKS](docs/local-jwt.md) usa o utilitário Java 21
 `scripts/LocalJwt.java`, sem dependências adicionais para gerar o material.
 Sem configuração de um decoder confiável, a aplicação não inicia.

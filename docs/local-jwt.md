@@ -5,6 +5,12 @@ O modo JWKS também usa Python 3 para servir exclusivamente a chave pública em
 loopback. Execute os comandos na raiz do projeto. O utilitário usa apenas o JDK,
 sem bibliotecas adicionais, OpenSSL ou serviço real de identidade.
 
+Este roteiro exercita o lado Resource Server com tokens assinados de verdade.
+O utilitário não oferece token endpoint OAuth nem valida `client_id` ou
+`client_secret`; portanto, não implementa o grant Client Credentials. O
+[fluxo M2M e a gestão de segredos](resource-server.md) descrevem o contrato
+esperado para um emissor externo, ainda não escolhido, sem exigir Cognito/AWS.
+
 ## Gerar material efêmero fora do Git
 
 Depois de copiar `.env.example` para `.env` e preencher os dados de banco:
@@ -108,7 +114,8 @@ tem a tolerância de relógio padrão do Spring Security. A autorização por
 consumidor usa o `sub`, portanto um token de outro consumidor não dá acesso ao
 pedido criado por `demo-consumer`.
 
-Para renovar por mais cinco minutos, preservando as chaves e o consumidor:
+Para renovar por mais cinco minutos com as mesmas chaves e o consumidor
+`demo-consumer`:
 
 ```bash
 java scripts/LocalJwt.java token "$JWT_DEMO_DIR"
@@ -121,6 +128,24 @@ Para emitir para outro consumidor, informe o terceiro argumento, por exemplo
 `another-consumer`. São aceitos de 1 a 100 caracteres alfanuméricos, `.`, `_`,
 `@` e `-`, começando por um alfanumérico. O comando substitui o header anterior;
 não é necessário reiniciar a API ao renovar o token com as mesmas chaves.
+
+## Renovação de token e rotação de chave
+
+`java scripts/LocalJwt.java token "$JWT_DEMO_DIR"` emite outro token com o par de
+chaves existente. Não rotaciona chave, não revoga o token anterior e não usa
+refresh token. O header em disco é substituído, mas cópias anteriores do Bearer
+continuam utilizáveis até a expiração, considerada a tolerância temporal.
+Sem o terceiro argumento, o consumidor usado é `demo-consumer`; se tiver
+escolhido outra identidade, repita-a ao renovar.
+
+Para trocar a chave de demonstração, pare a API e o servidor JWKS, se utilizado,
+e remova o material antigo seguindo a limpeza abaixo. Repita a geração com
+`create`, carregue o novo `env.sh` e reinicie a API no modo escolhido. O novo
+par tem outro `kid`; o decoder PEM só confia na nova chave após reiniciar.
+No JWKS, esta demonstração também exige reinício para não depender do cache de
+chaves antigas. Confirme o acesso com o novo Bearer. Esse procedimento local
+tem interrupção e não implementa sobreposição de chaves; a estratégia externa
+está em [rotação da chave de assinatura](resource-server.md#rotacionar-a-chave-de-assinatura-jwt).
 
 ## Encerrar e remover material
 
@@ -149,7 +174,7 @@ unset SPRING_SECURITY_OAUTH2_RESOURCESERVER_JWT_AUDIENCES
 O material não é apagado automaticamente ao parar a API. Expiração do token e
 remoção dos arquivos têm finalidades diferentes; sempre faça a limpeza.
 
-## Testes unitários desta tarefa
+## Testes unitários disponíveis
 
 Contrato do Access Token, geração e renovação:
 
