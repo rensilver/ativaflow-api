@@ -552,8 +552,55 @@ inclusive se a linha tiver sido removida entre a colisão e a releitura. Outras
 violações de integridade não são convertidas em repetição. Chamadas idênticas concorrentes
 produzem uma única linha, um `201` e `200` para as demais chamadas.
 
-Essa é a idempotência da API ao registrar trabalho. A idempotência da ativação
-no provedor exige garantias próprias da integração, ainda pendente.
+### Idempotência da API e idempotência da operação externa
+
+Idempotência significa que repetir a mesma operação mantém o mesmo efeito de
+executá-la uma vez. No AtivaFlow, há duas fronteiras distintas:
+
+| Aspecto | Idempotência da API | Idempotência da operação externa |
+| --- | --- | --- |
+| Operação repetida | `POST /api/v1/requests` do consumidor para o AtivaFlow. | Chamada do AtivaFlow ao provedor para ativar o produto. |
+| Efeito protegido | Registro de uma única solicitação para o mesmo `externalId`. | Uma única ativação no provedor para a mesma operação lógica, mesmo com múltiplos envios. |
+| Garantia necessária | Constraint `UNIQUE (external_id)` e reutilização do registro quando consumidor, cliente e produto coincidem. | Contrato de idempotência implementado pelo provedor, com deduplicação ou operação naturalmente idempotente. |
+| Situação atual | Implementada na criação, inclusive para requisições concorrentes. | Integração ainda pendente; não há garantia de efeito externo exatamente uma vez. |
+
+Na API, a primeira criação retorna `201 Created`; uma repetição idêntica pelo
+mesmo consumidor retorna `200 OK`, com o mesmo ID e a representação atual,
+sem criar trabalho adicional ou reiniciar o processamento. A idempotência se
+refere ao efeito persistido: o código HTTP e o status retornado podem mudar.
+Dados divergentes ou outro consumidor usando o mesmo `externalId` recebem
+`409 Conflict`, pois a unicidade do identificador é global. Usar outro
+`externalId` cria outra solicitação, mesmo para o mesmo cliente e produto.
+
+Na operação externa, manter uma única linha no PostgreSQL não impede que duas
+chamadas HTTP produzam duas ativações. A transação local não abrange o efeito
+no provedor: ele pode concluir a ativação e a aplicação perder a resposta ou
+falhar antes de persistir `COMPLETED`. Claims, leases e controle de versão
+coordenam o processamento local, mas não eliminam essa janela de incerteza.
+
+Por exemplo, na futura integração:
+
+1. O consumidor envia `EXT-12345`, e a API persiste a solicitação com `201`.
+2. O worker prepara a tentativa, chama o provedor, e o provedor ativa o produto.
+3. A resposta se perde por timeout; o AtivaFlow não consegue confirmar o resultado.
+4. Repetir o `POST` original retorna `200` com a mesma solicitação; isso não
+   resolve a incerteza nem autoriza outro envio ao provedor.
+5. Reenviar a ativação sem garantia externa de idempotência pode duplicar o efeito.
+
+Uma futura integração com chave de idempotência deve reutilizar a mesma chave
+para a mesma operação em todas as tentativas, conforme o contrato do provedor,
+incluindo escopo, prazo de retenção e tratamento de payload divergente. Enviar
+`externalId` como campo ou header, por si só, não garante deduplicação externa.
+Uma consulta de reconciliação pode confirmar o resultado, mas não torna a
+operação de ativação idempotente.
+
+Enquanto essas garantias não existirem, o protocolo local marca
+`reconciliation_required = true` antes do HTTP e mantém resultados ambíguos em
+`PROCESSING`, bloqueados para reenvio automático, inclusive após expiração do
+lease ou esgotamento de tentativas. Timeout, HTTP 500/503 e `Retry-After`
+isoladamente não comprovam ausência de ativação. O retry seguro atual exige
+garantia de que a tentativa não ativou o produto. Casos indeterminados exigem
+intervenção operacional; não há reconciliação automática implementada.
 
 ## Consulta de solicitação
 
