@@ -175,6 +175,42 @@ class CreateActivationRequestEndpointTests {
 		provider.verify(0, anyRequestedFor(anyUrl()));
 	}
 
+	@Test
+	void sequentialIdenticalRequestsReuseOriginalResponseAndKeepOneRecordForExternalId() throws Exception {
+		String externalId = objectMapper.readTree(PAYLOAD).get("externalId").asText();
+		assertThat(jdbcTemplate.queryForObject(
+				"SELECT COUNT(*) FROM activation_requests WHERE external_id = ?", Long.class, externalId)).isZero();
+
+		var created = mockMvc.perform(post(PATH).with(user(CONSUMER)).with(csrf())
+				.contentType(MediaType.APPLICATION_JSON).content(PAYLOAD))
+				.andExpect(status().isCreated())
+				.andExpect(jsonPath("$.status").value("PENDING"))
+				.andReturn().getResponse();
+		String originalResponse = created.getContentAsString();
+		String id = objectMapper.readTree(originalResponse).get("id").asText();
+		assertThat(created.getHeader("Location")).isEqualTo(PATH + "/" + id);
+		assertThat(jdbcTemplate.queryForObject(
+				"SELECT COUNT(*) FROM activation_requests WHERE external_id = ?", Long.class, externalId)).isEqualTo(1);
+		var storedBefore = jdbcTemplate.queryForMap(
+				"SELECT * FROM activation_requests WHERE external_id = ?", externalId);
+
+		for (int repetition = 0; repetition < 2; repetition++) {
+			mockMvc.perform(post(PATH).with(user(CONSUMER)).with(csrf())
+					.contentType(MediaType.APPLICATION_JSON).content(PAYLOAD))
+					.andExpect(status().isOk())
+					.andExpect(header().doesNotExist("Location"))
+					.andExpect(content().contentTypeCompatibleWith(MediaType.APPLICATION_JSON))
+					.andExpect(content().json(originalResponse, JsonCompareMode.STRICT));
+
+			assertThat(jdbcTemplate.queryForObject(
+					"SELECT COUNT(*) FROM activation_requests WHERE external_id = ?", Long.class, externalId))
+					.isEqualTo(1);
+			assertThat(jdbcTemplate.queryForMap(
+					"SELECT * FROM activation_requests WHERE external_id = ?", externalId)).isEqualTo(storedBefore);
+		}
+		provider.verify(0, anyRequestedFor(anyUrl()));
+	}
+
 	@ParameterizedTest
 	@EnumSource(ActivationStatus.class)
 	void identicalRepetitionReturnsCurrentRecordWithoutChangingOrReactivatingIt(ActivationStatus activationStatus)
