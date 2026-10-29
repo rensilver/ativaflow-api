@@ -181,11 +181,152 @@ da aplicação. Para subir novamente, mantenha `.env` e a chave pública dispon�
 e execute `docker compose up -d --wait`. Alterar a senha no `.env` não altera a
 senha de um banco já inicializado no volume; mantenha as credenciais coerentes.
 
-Depois de encerrar o ambiente, remova a cópia pública com
-`rm -- "$JWT_PUBLIC_KEY_FILE"` e limpe o material temporário conforme o
-[roteiro JWT](local-jwt.md#encerrar-e-remover-material).
-A demonstração autenticada completa e a validação de retomada de pendências
-continuam no próximo item de A01.
+Continue no mesmo terminal para demonstrar o fluxo abaixo. Mantenha o mesmo
+projeto Compose, senha e par de chaves durante as recriações.
+
+### Demonstração autenticada e retomada de pendências
+
+Além dos pré-requisitos anteriores, estes comandos usam `jq`. Execute-os em Bash,
+na raiz do projeto, depois da subida dos três serviços. Defina as URLs de acordo
+com as portas publicadas (o mock usa 8081). Se `SERVER_PORT` estiver somente no
+`.env`, ajuste `API_URL` explicitamente: o shell não carrega esse arquivo.
+
+```bash
+set -euo pipefail
+export API_URL="http://127.0.0.1:${SERVER_PORT:-8080}"
+export MOCK_URL=http://127.0.0.1:8081
+export DEMO_RUN="$(date -u +%Y%m%dT%H%M%SZ)-$RANDOM"
+java scripts/LocalJwt.java token "$JWT_DEMO_DIR"
+
+# Health público: 200; recurso protegido sem Bearer: 401.
+test "$(curl -sS -o /dev/null -w '%{http_code}' "$API_URL/actuator/health")" = 200
+test "$(curl -sS -o /dev/null -w '%{http_code}' "$API_URL/api/v1/requests")" = 401
+
+create_request() {
+  local external_id="$1" destination="$2" code
+  code=$(curl --silent --show-error --output "$destination" --write-out '%{http_code}' \
+    --header "@$JWT_DEMO_DIR/authorization.header" \
+    --header 'Content-Type: application/json' \
+    --data "$(jq -nc --arg id "$external_id" \
+      '{externalId:$id,customerId:"CUST-001",productCode:"INTERNET-500"}')" \
+    "$API_URL/api/v1/requests") || return 1
+  test "$code" = 201 && jq -e '.id' "$destination" >/dev/null
+}
+
+get_request() {
+  curl --fail --silent --show-error \
+    --header "@$JWT_DEMO_DIR/authorization.header" "$API_URL/api/v1/requests/$1"
+}
+
+await_completed() {
+  local id="$1" attempt status
+  for attempt in {1..60}; do
+    status=$(get_request "$id" | jq -er '.status') || return 1
+    if [ "$status" = COMPLETED ]; then return 0; fi
+    if [ "$status" = FAILED ]; then return 1; fi
+    sleep 1
+  done
+  printf 'Prazo de 60 consultas excedido: %s (%s)\n' "$id" "$status" >&2
+  return 1
+}
+
+provider_calls() {
+  curl --fail --silent --show-error "$MOCK_URL/__admin/requests" |
+    jq --arg id "$1" '[.requests[] |
+      select(.request.method == "POST" and .request.url == "/provider/v1/activate") |
+      select((.request.body | fromjson).externalId == $id)] | length'
+}
+
+create_request "COMPOSE-OK-$DEMO_RUN" "$JWT_DEMO_DIR/completed.json" || exit 1
+COMPLETED_ID=$(jq -er '.id' "$JWT_DEMO_DIR/completed.json")
+await_completed "$COMPLETED_ID" || exit 1
+get_request "$COMPLETED_ID" | jq
+test "$(provider_calls "COMPOSE-OK-$DEMO_RUN")" = 1 || exit 1
+```
+
+O POST deve responder `201`; o GET autenticado deve chegar a `COMPLETED`. O
+journal do WireMock comprova um POST real para `/provider/v1/activate` com o
+mesmo `externalId`. Não se exige observar `PENDING` no primeiro GET: o worker
+pode concluir antes da consulta. Se algum comando falhar, interrompa o roteiro
+e confira `docker compose logs --tail=100 app`; não marque a validação como aprovada.
+
+Para manter uma solicitação pendente sem depender de uma corrida com o scheduler,
+use um override temporário. Ele altera apenas a API e não modifica o YAML versionado.
+O arquivo fica em `.env.*`, ignorado pelo Git, em um caminho acessível também ao
+cliente Docker via Snap, que pode ter seu próprio `/tmp`:
+
+```bash
+export WORKER_OVERRIDE_FILE="$PWD/.env.compose-worker-paused.yaml"
+test ! -e "$WORKER_OVERRIDE_FILE" || exit 1
+cat > "$WORKER_OVERRIDE_FILE" <<'YAML'
+services:
+  app:
+    environment:
+      WORKER_ENABLED: "false"
+YAML
+docker compose -f docker-compose.yaml -f "$WORKER_OVERRIDE_FILE" \
+  up -d --no-deps --wait app
+java scripts/LocalJwt.java token "$JWT_DEMO_DIR"
+create_request "COMPOSE-PENDING-$DEMO_RUN" "$JWT_DEMO_DIR/pending.json" || exit 1
+PENDING_ID=$(jq -er '.id' "$JWT_DEMO_DIR/pending.json")
+get_request "$PENDING_ID" | jq -e '.status == "PENDING"' || exit 1
+test "$(provider_calls "COMPOSE-PENDING-$DEMO_RUN")" = 0 || exit 1
+
+docker compose stop app
+docker compose logs --tail=40 app
+docker inspect "$(docker compose ps -aq app)" \
+  --format 'ExitCode={{.State.ExitCode}} OOMKilled={{.State.OOMKilled}}'
+# Não adicione -v/--volumes: o volume contém a pendência que será retomada.
+docker compose down
+
+# Sem o override: o worker volta habilitado por padrão em uma nova instância.
+docker compose up -d --wait
+java scripts/LocalJwt.java token "$JWT_DEMO_DIR"
+await_completed "$PENDING_ID" || exit 1
+get_request "$PENDING_ID" | jq
+get_request "$COMPLETED_ID" | jq -e '.status == "COMPLETED"' || exit 1
+test "$(provider_calls "COMPOSE-PENDING-$DEMO_RUN")" = 1 || exit 1
+test "$(provider_calls "COMPOSE-OK-$DEMO_RUN")" = 0 || exit 1
+
+# Reinicie apenas a API e confira que nenhum dos pedidos foi reenviado.
+docker compose restart app
+docker compose up -d --wait
+java scripts/LocalJwt.java token "$JWT_DEMO_DIR"
+get_request "$PENDING_ID" | jq -e '.status == "COMPLETED"' || exit 1
+get_request "$COMPLETED_ID" | jq -e '.status == "COMPLETED"' || exit 1
+test "$(provider_calls "COMPOSE-PENDING-$DEMO_RUN")" = 1 || exit 1
+test "$(provider_calls "COMPOSE-OK-$DEMO_RUN")" = 0 || exit 1
+```
+
+Os logs da parada devem conter `Graceful shutdown complete`; confira também
+`OOMKilled=false` e ausência de SIGKILL (exit 137). Na validação local, a saída
+normal ao receber SIGTERM foi 143. O journal do mock fica em memória e é zerado
+no `down`/`up`: por isso, depois da recriação, deve haver uma chamada para a
+pendência retomada e nenhuma para o pedido já concluído. `restart app` preserva
+o journal e permite conferir novamente a ausência de reenvio.
+
+Esta demonstração cobre retomada de `PENDING` ainda sem tentativa externa. Leases
+vencidos só são retomados quando seguros pelas regras existentes; pedidos com
+resultado indeterminado continuam protegidos contra reenvio e exigem reconciliação.
+O roteiro não comprova recuperação de uma ativação interrompida durante o HTTP.
+
+### Encerrar preservando os dados
+
+```bash
+docker compose down
+rm -- "$JWT_PUBLIC_KEY_FILE" "$WORKER_OVERRIDE_FILE"
+rm -- "$JWT_DEMO_DIR/completed.json" "$JWT_DEMO_DIR/pending.json"
+unset API_URL MOCK_URL DEMO_RUN COMPLETED_ID PENDING_ID JWT_PUBLIC_KEY_FILE WORKER_OVERRIDE_FILE
+unset -f create_request get_request await_completed provider_calls
+```
+
+Limpe também o material temporário e as variáveis JWT conforme o
+[roteiro JWT](local-jwt.md#encerrar-e-remover-material). A chave privada e o Bearer
+permanecem fora do repositório durante toda a demonstração; somente a cópia pública
+é montada no container. O volume do PostgreSQL permanece. Para reutilizar esses
+dados mais tarde, mantenha a senha e prepare uma nova chave pública/token antes
+da subida. Não use `down --volumes`, `docker volume prune` ou `docker system prune`
+como limpeza deste roteiro; a remoção de dados deve ser uma decisão separada.
 
 ## Evidência de validação — 29/10/2026
 
@@ -206,8 +347,8 @@ Validação local em Linux/amd64 da imagem `ativaflow-api:local`:
 Neste ambiente, o Docker via Snap recusou a execução tanto de `java` quanto de
 `sh` com `--security-opt no-new-privileges=true` (`operation not permitted`).
 O roteiro e a validação acima usam as demais restrições descritas na tabela.
-A validação de retomada de pendências pertence ao roteiro completo com Compose,
-ainda pendente em A01.
+A retomada de pendências foi validada posteriormente no roteiro completo com
+Compose, conforme a evidência ao final deste guia.
 
 ## Evidência de validação do Compose — 29/10/2026
 
@@ -223,5 +364,27 @@ evitar conflitos com serviços existentes:
 | Suíte | `./mvnw -B --no-transfer-progress clean verify`: 949 testes em 58 relatórios; 0 falhas, erros ou ignorados. |
 | Limpeza | Removidos somente containers, rede, volume e material JWT do projeto de teste. |
 
-Esse smoke test comprova persistência de um registro concluído. A validação de
-retomada de trabalho ainda pendente após restart continua no próximo item de A01.
+Esse primeiro smoke test comprovou persistência de um registro concluído. A
+validação complementar abaixo exercita a retomada de trabalho ainda pendente.
+
+## Evidência do roteiro completo — 29/10/2026
+
+Executados os blocos Bash da demonstração em projeto Compose isolado, com API
+em `127.0.0.1:18080` e mock em `127.0.0.1:8081`, usando JWT temporário do utilitário.
+
+| Verificação | Resultado |
+| --- | --- |
+| Build e configuração | `docker compose config --quiet` e `up --build -d --wait` passaram; três serviços saudáveis, API `10001:10001` e chave pública montada somente para leitura. |
+| Fluxo autenticado | Health 200, GET sem Bearer 401, POST com Bearer 201; GET chegou a `COMPLETED` e o WireMock registrou exatamente uma chamada correspondente. |
+| Pendência durável | Com `WORKER_ENABLED=false` apenas no override, o segundo POST retornou 201; GET confirmou `PENDING` e o journal não continha chamada para esse pedido. |
+| Recriação e retomada | `stop app`, `down` sem remover o volume e nova subida sem override; o worker concluiu a pendência automaticamente e o pedido anterior permaneceu `COMPLETED`. O novo journal registrou uma chamada para a pendência e nenhuma para o pedido anterior. |
+| Restart da API | Ambos permaneceram `COMPLETED`; contagens no journal preservadas, inclusive após vários ciclos do scheduler. Consulta ao PostgreSQL confirmou `attempt_count=1` e `reconciliation_required=false` nos dois registros. |
+| Shutdown | Log `Graceful shutdown complete`, exit 143, `OOMKilled=false`. |
+| Suíte | `./mvnw -B --no-transfer-progress clean verify`: 949 testes em 58 relatórios, 0 falhas, erros ou ignorados, incluindo PostgreSQL via Testcontainers. |
+| Roteiros | Sintaxe Bash dos 18 blocos deste guia e de `local-jwt.md` conferida com `bash -n`. |
+| Limpeza | Depois de provar a preservação entre subidas, removidos somente containers, rede, volume efêmero, override e material JWT do projeto de teste. Serviços existentes preservados. O roteiro de uso mantém o volume. |
+
+O Docker via Snap não enxergou um override criado no `/tmp` do host. Um YAML
+mínimo confirmou o isolamento; o roteiro usa `.env.compose-worker-paused.yaml`
+no projeto, sem credenciais e ignorado pelo Git/contexto de build. Chave privada
+e Bearer continuam no diretório temporário privado, acessado apenas pelo JDK/curl.

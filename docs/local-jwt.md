@@ -11,6 +11,12 @@ O utilitário não oferece token endpoint OAuth nem valida `client_id` ou
 [fluxo M2M e a gestão de segredos](resource-server.md) descrevem o contrato
 esperado para um emissor externo, ainda não escolhido, sem exigir Cognito/AWS.
 
+Para executar a API em container junto com PostgreSQL e WireMock, siga o
+[roteiro completo do Compose](container-image.md#ambiente-completo-com-docker-compose).
+Ele reutiliza este utilitário e os mesmos issuer/audience, monta somente a chave
+pública e demonstra POST/GET autenticados, shutdown e retomada de pendências.
+Nesse modo, não carregue o `.env` pelo shell: o Compose o lê automaticamente.
+
 ## Gerar material efêmero fora do Git
 
 Depois de copiar `.env.example` para `.env` e preencher os dados de banco:
@@ -27,7 +33,9 @@ O comando imprime somente o diretório criado em `java.io.tmpdir` (normalmente
 `/tmp/ativaflow-jwt.*` em Linux). Se o diretório temporário estiver dentro de um
 checkout Git, a geração falha; use `java -Djava.io.tmpdir=/tmp
 scripts/LocalJwt.java create`. O roteiro suporta Linux/macOS com permissões POSIX.
-Não copie os arquivos gerados para o repositório, nem para fixtures de testes.
+Mantenha os arquivos gerados fora do repositório e das fixtures de testes. Para
+o Compose, o roteiro permite copiar somente `public.pem` para o arquivo local
+ignorado `.env.jwt-public.pem`, legível pelo usuário do container.
 
 | Arquivo | Conteúdo |
 | --- | --- |

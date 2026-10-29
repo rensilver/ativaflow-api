@@ -1196,6 +1196,9 @@ dependências. Prepare a senha e a chave pública conforme o
 [guia do Compose](docs/container-image.md#ambiente-completo-com-docker-compose)
 e execute `docker compose up --build -d --wait`. Banco e provedor usam URLs
 internas; API e mock publicam portas apenas em loopback. O banco não publica porta.
+O [roteiro de demonstração](docs/container-image.md#demonstração-autenticada-e-retomada-de-pendências)
+conecta geração do JWT, POST/GET, confirmação no mock e retomada de uma pendência
+após recriar os serviços mantendo o volume, além de verificar shutdown e restart.
 
 ### Provedor simulado no Compose
 
