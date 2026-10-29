@@ -4,6 +4,7 @@ import java.time.Clock;
 import java.time.Instant;
 import java.time.ZoneOffset;
 import java.util.Optional;
+import java.util.stream.IntStream;
 
 import com.github.tomakehurst.wiremock.junit5.WireMockRuntimeInfo;
 import com.github.tomakehurst.wiremock.junit5.WireMockTest;
@@ -13,6 +14,7 @@ import com.rensilver.ativaflow_api.domain.ProviderOutcome;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.CsvSource;
+import org.junit.jupiter.params.provider.MethodSource;
 import org.junit.jupiter.params.provider.ValueSource;
 import org.springframework.boot.autoconfigure.AutoConfigurations;
 import org.springframework.boot.autoconfigure.http.client.HttpClientAutoConfiguration;
@@ -67,10 +69,14 @@ class HttpActivationProviderClientTests {
 	}
 
 	@ParameterizedTest
-	@ValueSource(ints = {200, 201, 204})
-	void acceptsOnlyContractedSuccessStatusesWithoutParsingABody(int status, WireMockRuntimeInfo wireMock) {
+	@MethodSource("successStatuses")
+	void treatsEveryTwoHundredStatusAsCompletedWithoutParsingABody(int status, WireMockRuntimeInfo wireMock) {
 		stubFor(post(PATH).willReturn(aResponse().withStatus(status).withBody("not a JSON response")));
 		assertOutcome(wireMock, new ProviderOutcome.Success());
+	}
+
+	private static IntStream successStatuses() {
+		return IntStream.rangeClosed(200, 299);
 	}
 
 	@Test
@@ -87,7 +93,7 @@ class HttpActivationProviderClientTests {
 	}
 
 	@ParameterizedTest
-	@ValueSource(ints = {202, 203, 205, 206, 301, 302, 303, 307, 308, 401, 403, 404, 409, 502, 504})
+	@ValueSource(ints = {301, 302, 303, 307, 308, 401, 403, 404, 409, 502, 504})
 	void preservesUncontractedOutcomesAndDoesNotFollowRedirects(int status, WireMockRuntimeInfo wireMock) {
 		stubFor(post(PATH).willReturn(aResponse().withStatus(status)
 				.withHeader("Location", wireMock.getHttpBaseUrl() + "/redirect-target")));

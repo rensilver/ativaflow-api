@@ -34,12 +34,16 @@ public class HttpActivationProviderClient implements ActivationProviderClient {
 					.uri("/provider/v1/activate")
 					.contentType(MediaType.APPLICATION_JSON)
 					.body(request)
-					.exchange((httpRequest, response) -> switch (response.getStatusCode().value()) {
-						case 200, 201, 204 -> new ProviderOutcome.Success();
-						case 400 -> new ProviderOutcome.PermanentFailure("PROVIDER_REJECTED");
-						// A garantia de não ativação pertence ao contrato simulado, não ao status HTTP.
-						case 429, 500, 503 -> safeTransientFailure(response.getHeaders().getFirst(HttpHeaders.RETRY_AFTER));
-						default -> new ProviderOutcome.Indeterminate("PROVIDER_UNCONFIRMED_RESPONSE");
+					.exchange((httpRequest, response) -> {
+						if (response.getStatusCode().is2xxSuccessful()) {
+							return new ProviderOutcome.Success();
+						}
+						return switch (response.getStatusCode().value()) {
+							case 400 -> new ProviderOutcome.PermanentFailure("PROVIDER_REJECTED");
+							// A garantia de não ativação pertence ao contrato simulado, não ao status HTTP.
+							case 429, 500, 503 -> safeTransientFailure(response.getHeaders().getFirst(HttpHeaders.RETRY_AFTER));
+							default -> new ProviderOutcome.Indeterminate("PROVIDER_UNCONFIRMED_RESPONSE");
+						};
 					});
 		}
 		catch (RestClientException exception) {
