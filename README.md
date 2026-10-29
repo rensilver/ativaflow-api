@@ -119,6 +119,15 @@ adiciona os campos internos abaixo, preservando a V1 e o contrato público:
 | `last_error_code` | `VARCHAR(100)`, opcional; código categorizado da última falha, sem payload, credenciais ou resposta bruta do provedor. |
 | `reconciliation_required` | `BOOLEAN`, obrigatório, padrão `false`; indica resultado externo indeterminado que exige reconciliação. |
 
+O contrato de uso desses campos está definido na
+[ADR-0001 — Metadados de processamento](docs/adr/0001-metadados-de-processamento.md),
+incluindo contagem antes do envio, próximo agendamento, validade do lease,
+proteção por versão e recuperação de resultado indeterminado. O futuro worker
+deverá ativar `reconciliation_required` preventivamente antes do HTTP e limpar
+a sinalização apenas ao persistir um resultado conhecido. Assim, uma queda entre
+envio e gravação do resultado não libera um reenvio automático. A ADR define
+o protocolo; sua execução pelo worker ainda está pendente.
+
 `consumer_id` é diferente de `customer_id`: o primeiro identifica o sistema
 consumidor autenticado; o segundo identifica o cliente informado no pedido.
 A derivação de `consumer_id` da identidade confiável do JWT (por exemplo,
@@ -129,14 +138,14 @@ aceito do payload. Os DTOs públicos aceitam apenas `externalId`,
 Nenhuma das oito colunas internas deverá ser exposta na API.
 
 O schema, a entidade JPA e os DTOs estão implementados e cobertos por testes.
-Autenticação, endpoints, worker, retries, lease e reconciliação ainda estão
-pendentes. Os campos opcionais começam nulos; a sinalização de reconciliação
+Worker, retries, claim/lease e reconciliação ainda estão pendentes.
+Os campos opcionais começam nulos; a sinalização de reconciliação
 permitirá manter um resultado ambíguo em
 `PROCESSING`, sem adicionar estados públicos. O limite de tentativas será
 aplicado pelo processamento; a constraint do banco impede somente contagens
 negativas. A unicidade de `external_id` continua global, inclusive entre
-consumidores. Índices para consultas/claim serão definidos quando essas
-operações forem implementadas.
+consumidores. Os índices de listagem estão na V3; índices para claim serão
+definidos com a implementação dessa operação.
 
 `model.ActivationRequest` mapeia todas as colunas de V1/V2, com acesso JPA pelos
 campos e construtor sem argumentos `protected`, compatível com o Hibernate.
@@ -178,9 +187,9 @@ de desenvolvimento. Não há proprietário padrão nem backfill inferido de
 `consumer_id NOT NULL` falhará: será necessário planejar a atribuição dos
 proprietários antes de aplicar essa migração a um banco com dados.
 
-Os diretórios `infra/wiremock/mappings/`,
-`infra/wiremock/__files/` e `docs/adr/` também estão preparados, sem conteúdo além
-dos arquivos `.gitkeep`.
+Os diretórios `infra/wiremock/mappings/` e `infra/wiremock/__files/` também estão
+preparados, sem conteúdo além dos arquivos `.gitkeep`. As decisões técnicas
+estão em `docs/adr/`.
 
 ## Contratos de entrada e saída
 
