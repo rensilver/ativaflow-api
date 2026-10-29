@@ -7,13 +7,16 @@ import org.mapstruct.Mapper;
 import org.mapstruct.MappingConstants;
 import org.mapstruct.ReportingPolicy;
 
-/** Converts entities to the public response contract without internal processing metadata. */
+/**
+ * Converte entidades em respostas públicas sem metadados internos de processamento.
+ * A criação de entidades cabe à fábrica de domínio, com um proprietário fornecido pela aplicação.
+ */
 @Mapper(componentModel = MappingConstants.ComponentModel.SPRING,
 		unmappedTargetPolicy = ReportingPolicy.ERROR,
 		unmappedSourcePolicy = ReportingPolicy.ERROR)
 public interface ActivationRequestMapper {
 
-	// Every omitted source property must be explicitly reviewed as internal metadata.
+	// Cada propriedade de origem omitida deve ser explicitamente revisada como metadado interno.
 	@BeanMapping(ignoreUnmappedSourceProperties = {
 			"consumerId", "version", "attemptCount", "nextAttemptAt",
 			"leaseUntil", "claimedBy", "lastErrorCode", "reconciliationRequired"

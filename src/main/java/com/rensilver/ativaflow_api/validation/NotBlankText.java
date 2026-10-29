@@ -9,7 +9,7 @@ import java.lang.annotation.Target;
 import jakarta.validation.Constraint;
 import jakarta.validation.Payload;
 
-/** Rejects null or blank text using the same Unicode semantics as String.isBlank(). */
+/** Rejeita texto nulo ou em branco usando a mesma semântica Unicode de String.isBlank(). */
 @Documented
 @Constraint(validatedBy = NotBlankTextValidator.class)
 @Target({ElementType.FIELD, ElementType.METHOD, ElementType.PARAMETER, ElementType.ANNOTATION_TYPE,

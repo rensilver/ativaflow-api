@@ -190,7 +190,7 @@ class ActivationRequestPersistenceTests {
 	}
 
 	private ActivationRequest newRequest() {
-		return new ActivationRequest("EXT-" + UUID.randomUUID(), "CUSTOMER-1", "PRODUCT-1", "consumer-a");
+		return ActivationRequest.create("EXT-" + UUID.randomUUID(), "CUSTOMER-1", "PRODUCT-1", "consumer-a");
 	}
 
 	@TestConfiguration(proxyBeanMethods = false)

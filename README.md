@@ -134,10 +134,13 @@ operações forem implementadas.
 
 `model.ActivationRequest` mapeia todas as colunas de V1/V2, com acesso JPA pelos
 campos e construtor sem argumentos `protected`, compatível com o Hibernate.
-O construtor público recebe `externalId`, `customerId`, `productCode` e
-`consumerId`, exige texto não vazio de até 100 caracteres, preserva os valores
-sem normalização, gera o UUID na aplicação e inicia em `PENDING`. O proprietário
+O código de aplicação usa `ActivationRequest.create(externalId, customerId,
+productCode, trustedConsumerId)`. A factory delega a um construtor privado,
+exige texto não vazio de até 100 caracteres e preserva os valores sem normalização.
+Ela gera o UUID na aplicação e inicia em `PENDING`. O proprietário
 deve ser fornecido pela camada de autenticação confiável, nunca pelo payload.
+Não há construtor público para criação automática pelo MapStruct. A factory
+não recebe UUID, status, versão ou datas de auditoria.
 
 A entidade expõe getters, sem setters públicos ou builder. As mudanças de estado
 ocorrem por `startProcessing()` (`PENDING → PROCESSING`), `complete()`
@@ -233,6 +236,14 @@ essa lista dispensa apenas o diagnóstico de origem e não autoriza adicioná-lo
 ao DTO público. O teste de JSON protege os sete campos permitidos na resposta.
 O mapper preserva identificadores, status e instantes, sem atribuir datas:
 auditoria ainda não preenchida permanece nula, e entidade nula produz resposta nula.
+Um teste de arquitetura impede que os mappers chamem a factory de criação.
+
+A desserialização Jackson rejeita propriedades desconhecidas na configuração
+compartilhada (`fail-on-unknown-properties: true`). Na criação, somente
+`externalId`, `customerId` e `productCode` são aceitos: tentativas de enviar `id`,
+`status`, `consumerId`/`owner`, auditoria ou metadados internos falham na leitura
+do JSON, antes de criar a entidade. Ao usar `@RequestBody`, essa falha é tratada
+pelo Spring MVC como HTTP 400.
 
 Os DTOs definem os contratos; os endpoints ainda estão pendentes. A validação
 das entradas deverá ser acionada com `@Valid` no parâmetro `@RequestBody` dos
@@ -346,6 +357,8 @@ sem banco ou contexto Spring.
 `ActivationDtosJsonTests` usa `@JsonTest` para verificar leitura/escrita do payload,
 preservação dos identificadores e serialização exclusiva dos sete campos públicos,
 incluindo os quatro status e datas UTC, sem depender de Docker.
+Também verifica a rejeição individual dos campos controlados pelo servidor
+no payload de criação.
 `ActivationRequestMapperTests` usa `@JsonTest` com o mapper gerado e descoberto
 como bean Spring para verificar a conversão nos quatro estados, preservação
 dos valores e ausência dos oito metadados internos no JSON mesmo quando

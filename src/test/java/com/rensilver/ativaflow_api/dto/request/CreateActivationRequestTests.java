@@ -65,7 +65,7 @@ class CreateActivationRequestTests {
 		var request = new CreateActivationRequest(value, value, value);
 
 		assertThat(validator.validate(request)).isEmpty();
-		var entity = new ActivationRequest(request.externalId(), request.customerId(), request.productCode(), "consumer-a");
+		var entity = ActivationRequest.create(request.externalId(), request.customerId(), request.productCode(), "consumer-a");
 		assertThat(entity.getExternalId()).isEqualTo(value);
 		assertThat(entity.getCustomerId()).isEqualTo(value);
 		assertThat(entity.getProductCode()).isEqualTo(value);

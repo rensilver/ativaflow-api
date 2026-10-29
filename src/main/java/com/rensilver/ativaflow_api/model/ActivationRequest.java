@@ -77,13 +77,20 @@ public class ActivationRequest {
 	private boolean reconciliationRequired;
 
 	protected ActivationRequest() {
-		// Required by Hibernate; application code uses the validated constructor.
+		// Exigido pelo Hibernate; o código da aplicação usa a fábrica de domínio.
 	}
 
 	/**
-	 * consumerId must come from the authenticated identity, never from the API payload.
+	 * Cria uma solicitação pendente com um identificador gerado pelo servidor. A aplicação deve
+	 * fornecer trustedConsumerId a partir da identidade autenticada, nunca do corpo da requisição.
+	 * A persistência gerencia as datas de auditoria e a versão; os mapeadores apenas produzem respostas.
 	 */
-	public ActivationRequest(String externalId, String customerId, String productCode, String consumerId) {
+	public static ActivationRequest create(String externalId, String customerId, String productCode,
+			String trustedConsumerId) {
+		return new ActivationRequest(externalId, customerId, productCode, trustedConsumerId);
+	}
+
+	private ActivationRequest(String externalId, String customerId, String productCode, String consumerId) {
 		this.externalId = requireText(externalId, "externalId");
 		this.customerId = requireText(customerId, "customerId");
 		this.productCode = requireText(productCode, "productCode");
@@ -102,7 +109,7 @@ public class ActivationRequest {
 		status = ActivationStatus.COMPLETED;
 	}
 
-	/** Records a categorized error code, not a raw provider response. */
+	/** Registra um código de erro categorizado, e não a resposta bruta do provedor. */
 	public void fail(String errorCode) {
 		requireStatus(ActivationStatus.PROCESSING, ActivationStatus.FAILED);
 		lastErrorCode = requireText(errorCode, "errorCode");

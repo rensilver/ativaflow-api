@@ -1,6 +1,9 @@
 spring:
   application:
     name: ativaflow-api
+  jackson:
+    deserialization:
+      fail-on-unknown-properties: true
   datasource:
     hikari:
       # HikariCP recebe este timeout em milissegundos.
