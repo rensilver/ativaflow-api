@@ -11,18 +11,23 @@ import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 
 import com.rensilver.ativaflow_api.config.JpaAuditingConfiguration;
+import com.rensilver.ativaflow_api.model.ActivationRequest;
 import com.rensilver.ativaflow_api.repository.ActivationRequestRepository;
 import com.rensilver.ativaflow_api.service.ActivationRequestClaimService;
 import com.rensilver.ativaflow_api.service.ClaimedActivationRequest;
+import jakarta.persistence.EntityManagerFactory;
+import jakarta.persistence.OptimisticLockException;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.CsvSource;
+import org.junit.jupiter.params.provider.ValueSource;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.autoconfigure.jdbc.AutoConfigureTestDatabase;
 import org.springframework.boot.test.autoconfigure.orm.jpa.DataJpaTest;
 import org.springframework.context.annotation.Import;
 import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.orm.ObjectOptimisticLockingFailureException;
 import org.springframework.test.context.ActiveProfiles;
 import org.springframework.transaction.PlatformTransactionManager;
 import org.springframework.transaction.annotation.Propagation;
@@ -30,6 +35,7 @@ import org.springframework.transaction.annotation.Transactional;
 import org.springframework.transaction.support.TransactionTemplate;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 @Import({TestcontainersConfiguration.class, JpaAuditingConfiguration.class, ActivationRequestClaimService.class})
 @DataJpaTest(properties = {"app.worker.lease-duration=45s",
@@ -50,6 +56,9 @@ class ActivationRequestClaimTests {
 
 	@Autowired
 	private PlatformTransactionManager transactionManager;
+
+	@Autowired
+	private EntityManagerFactory entityManagerFactory;
 
 	@BeforeEach
 	void cleanDatabase() {
@@ -243,6 +252,85 @@ class ActivationRequestClaimTests {
 		new TransactionTemplate(transactionManager).executeWithoutResult(transaction ->
 				assertThat(repository.tryClaim(id, 0, "worker-a", 45000)).isZero());
 		assertThat(jdbc.queryForMap("SELECT * FROM activation_requests WHERE id = ?", id)).isEqualTo(before);
+	}
+
+	@Test
+	void rejectsManagedUpdateLoadedBeforeNativeClaim() {
+		UUID id = insert("PENDING", 0, null, false, null);
+		try (var staleContext = entityManagerFactory.createEntityManager()) {
+			staleContext.getTransaction().begin();
+			try {
+				var stale = staleContext.find(ActivationRequest.class, id);
+				assertThat(service.claimNext("worker-a")).isPresent();
+				var claimedRow = jdbc.queryForMap("SELECT * FROM activation_requests WHERE id = ?", id);
+
+				stale.startProcessing();
+
+				assertThatThrownBy(staleContext::flush).isInstanceOf(OptimisticLockException.class);
+				staleContext.getTransaction().rollback();
+				assertThat(jdbc.queryForMap("SELECT * FROM activation_requests WHERE id = ?", id))
+						.isEqualTo(claimedRow);
+			} finally {
+				if (staleContext.getTransaction().isActive()) {
+					staleContext.getTransaction().rollback();
+				}
+			}
+		}
+	}
+
+	@Test
+	void nativeClaimDiscardsManagedCandidateBeforeLaterFlush() {
+		UUID id = insert("PENDING", 0, null, false, null);
+		new TransactionTemplate(transactionManager).executeWithoutResult(transaction -> {
+			var candidate = repository.findNextClaimCandidate().orElseThrow();
+			assertThat(repository.tryClaim(id, candidate.getVersion(), "worker-a", 45000)).isEqualTo(1);
+			var claimedRow = jdbc.queryForMap("SELECT * FROM activation_requests WHERE id = ?", id);
+
+			candidate.startProcessing();
+			repository.flush();
+
+			assertThat(jdbc.queryForMap("SELECT * FROM activation_requests WHERE id = ?", id)).isEqualTo(claimedRow);
+			var reloaded = repository.findById(id).orElseThrow();
+			assertThat(reloaded.getVersion()).isEqualTo(1);
+			assertThat(reloaded.getClaimedBy()).isEqualTo("worker-a");
+		});
+	}
+
+	@ParameterizedTest
+	@ValueSource(strings = {"worker-a", "worker-b"})
+	void rejectsDetachedResultAfterReclaimEvenWhenWorkerIdIsReused(String replacementWorker) {
+		UUID id = insert("PENDING", 0, null, false, null);
+		var original = service.claimNext("worker-a").orElseThrow();
+		var stale = repository.findById(id).orElseThrow();
+		// Simula a passagem do tempo sem mudar a versão: a retomada deve invalidar a posse anterior.
+		jdbc.update("UPDATE activation_requests SET lease_until = CURRENT_TIMESTAMP - INTERVAL '1 second' WHERE id = ?", id);
+		var replacement = service.claimNext(replacementWorker).orElseThrow();
+		var claimedRow = jdbc.queryForMap("SELECT * FROM activation_requests WHERE id = ?", id);
+		assertThat(replacement.version()).isEqualTo(original.version() + 1);
+
+		stale.complete();
+
+		assertThatThrownBy(() -> repository.saveAndFlush(stale))
+				.isInstanceOf(ObjectOptimisticLockingFailureException.class);
+		assertThat(jdbc.queryForMap("SELECT * FROM activation_requests WHERE id = ?", id)).isEqualTo(claimedRow);
+	}
+
+	@Test
+	void staleClaimCannotAcquireAnEligibleRowAfterLeaseExpiresAgain() {
+		UUID id = insert("PENDING", 0, null, false, null);
+		var original = service.claimNext("worker-a").orElseThrow();
+		jdbc.update("UPDATE activation_requests SET lease_until = CURRENT_TIMESTAMP - INTERVAL '1 second' WHERE id = ?", id);
+		var replacement = service.claimNext("worker-a").orElseThrow();
+		jdbc.update("UPDATE activation_requests SET lease_until = CURRENT_TIMESTAMP - INTERVAL '1 second' WHERE id = ?", id);
+		var before = jdbc.queryForMap("SELECT * FROM activation_requests WHERE id = ?", id);
+
+		new TransactionTemplate(transactionManager).executeWithoutResult(transaction ->
+				assertThat(repository.tryClaim(id, original.version(), "worker-a", 45000)).isZero());
+
+		assertThat(jdbc.queryForMap("SELECT * FROM activation_requests WHERE id = ?", id)).isEqualTo(before);
+		new TransactionTemplate(transactionManager).executeWithoutResult(transaction ->
+				assertThat(repository.tryClaim(id, replacement.version(), "worker-a", 45000)).isEqualTo(1));
+		assertThat(repository.findById(id).orElseThrow().getVersion()).isEqualTo(replacement.version() + 1);
 	}
 
 	private UUID insert(String status, int attempts, Integer nextDelay, boolean reconciliation, Integer leaseDelay) {

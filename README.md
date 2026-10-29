@@ -227,6 +227,18 @@ após o SQL direto, e a releitura retorna os metadados efetivamente persistidos.
 O proxy Spring confirma o commit antes de entregar o resultado ao chamador,
 inclusive quando uma transação externa depois sofre rollback.
 
+O incremento explícito da versão no claim invalida entidades carregadas antes
+dele: tanto o flush de uma entidade gerenciada quanto o merge de uma entidade
+desatualizada são rejeitados pelo controle otimista, preservando a linha vencedora.
+Isso também vale quando um lease vencido é retomado pelo mesmo `workerId`:
+a versão identifica a nova posse. Uma versão antiga não volta a ser válida
+quando o lease expira novamente. Conflitos não devem ser contornados relendo a
+versão atual para repetir uma gravação com dados antigos.
+
+Os testes de integração com PostgreSQL verificam essa interação entre JPA e
+SQL nativo, o descarte da candidata no contexto JPA e a preservação de estados
+terminais quando conclusão e falha disputam a mesma versão.
+
 Esta etapa não adiciona scheduler nem chama o provedor. O claim sozinho não
 autoriza HTTP: a preparação do envio e as futuras escritas devem aplicar as
 verificações de posse, versão e lease da ADR-0001. Resultados indeterminados,
