@@ -145,8 +145,9 @@ abaixo. A integração HTTP continua pendente.
 
 `consumer_id` é diferente de `customer_id`: o primeiro identifica o sistema
 consumidor autenticado; o segundo identifica o cliente informado no pedido.
-A derivação de `consumer_id` da identidade confiável do JWT (por exemplo,
-`client_id`) será implementada na etapa de autenticação. Ele não poderá ser
+A derivação de `consumer_id` usa `Principal.getName()`, que no Resource Server
+corresponde ao `sub` do JWT validado. Um eventual mapeamento para `client_id`
+depende do contrato do emissor. Ele não pode ser
 aceito do payload. Os DTOs públicos aceitam apenas `externalId`,
 `customerId` e `productCode` na criação e expõem apenas `id`, `externalId`,
 `customerId`, `productCode`, `status`, `createdAt` e `updatedAt` nas respostas.
@@ -658,8 +659,9 @@ descrição padrão. Para status sem constante em `HttpStatus`, o código numér
 | Bean Validation no corpo ou nos parâmetros | 400 | Mensagem segura e `errors: [{field, message}]`, sem valores rejeitados. |
 | Tipo de parâmetro inválido ou parâmetro obrigatório ausente | 400 | `Invalid request parameters` e `errors: [{field, message}]`. |
 | Paginação fora dos limites suportados pelo serviço | 400 | `Invalid request parameters`. |
-| Autenticação ausente ou credenciais HTTP Basic inválidas | 401 | `Authentication is required`, com `WWW-Authenticate: Basic realm="Realm"`. |
-| Acesso negado ou rejeição de CSRF | 403 | `Access is denied`. |
+| Autenticação ausente ou JWT inválido/expirado | 401 | `Authentication is required`, com desafio `WWW-Authenticate: Bearer`; token inválido inclui `error="invalid_token"`. |
+| Falha de protocolo OAuth com código `invalid_request` | 400 | `Invalid authentication request`, preservando o código OAuth. |
+| Acesso negado | 403 | `Access is denied`, com desafio Bearer apropriado. |
 | Solicitação inexistente ou de outro consumidor | 404 | `Activation request not found`. |
 | Colisão de `externalId` | 409 | `Activation request conflict`. |
 | Outros erros do MVC, como método ou mídia incompatíveis | Status do MVC | Mensagem segura, preservando cabeçalhos como `Allow`. |
@@ -718,9 +720,9 @@ Exceções de autenticação e autorização continuam sob responsabilidade da
 cadeia Spring Security. `SecurityProblemHandler` implementa `AuthenticationEntryPoint`
 e `AccessDeniedHandler`, produzindo o mesmo contrato nos erros 401/403 dos filtros,
 inclusive quando o cliente solicita HTML. Uma requisição sem autenticação a um
-recurso protegido recebe 401 em vez de redirecionamento para login; uma rejeição
-de CSRF continua retornando 403. A configuração mantém HTTP Basic e form login;
-JWT e escopos permanecem pendentes.
+recurso protegido recebe 401 em vez de redirecionamento para login. A configuração
+usa JWT Bearer stateless; regras de escopo permanecem pendentes. Detalhes internos
+do decoder são removidos também do desafio `WWW-Authenticate`.
 
 `ApiExceptionHandlerUnitTests` exercita o contrato HTTP com MockMvc standalone,
 validação e serialização reais, sem Spring Boot, banco ou provedor externo:
@@ -807,20 +809,16 @@ ao cliente do provedor ou ao worker. Para executar somente esses testes:
 bash ./mvnw -Dtest=AsyncProviderFailureIsolationUnitTests test
 ```
 
-A segurança atual exige autenticação e CSRF. Exemplo com credenciais válidas,
-cookie de sessão e token CSRF obtidos na mesma sessão (por exemplo, no formulário
-`/login`):
+A segurança exige um Access Token JWT do emissor confiável no header Bearer:
 
 ```bash
 curl -i -X POST http://localhost:8080/api/v1/requests \
-  --user "$API_USER:$API_PASSWORD" \
-  --cookie "JSESSIONID=$SESSION_ID" \
-  --header "X-CSRF-TOKEN: $CSRF_TOKEN" \
+  --header "Authorization: Bearer $ACCESS_TOKEN" \
   --header 'Content-Type: application/json' \
   --data '{"externalId":"EXT-12345","customerId":"CUST-10001","productCode":"INTERNET-500"}'
 ```
 
-JWT e escopos ainda estão pendentes. A unicidade global de `externalId` continua
+As regras de escopo ainda estão pendentes. A unicidade global de `externalId` continua
 garantida pela constraint do PostgreSQL.
 
 Ao repetir o `POST` com o mesmo `externalId`, `customerId`, `productCode` e
@@ -1231,13 +1229,40 @@ Spring Boot 3.5.x. `OpenApiConfiguration` define título, descrição e versão
 
 `SecurityConfiguration` permite acesso sem autenticação às rotas da documentação
 e mantém o health check público e a exigência de autenticação nas demais rotas.
-Os mecanismos padrão de login, HTTP Basic e proteção CSRF do Spring Security
-continuam habilitados; a autenticação JWT ainda será implementada.
+A autenticação usa o Resource Server JWT stateless descrito abaixo.
 A documentação fica disponível em todos os perfis. Para desativá-la, configure
 `SPRINGDOC_API_DOCS_ENABLED=false` e `SPRINGDOC_SWAGGER_UI_ENABLED=false`.
 
 O controller de criação é documentado automaticamente, com os DTOs de entrada
 e saída. As entidades JPA não são expostas pela documentação.
+
+## OAuth 2.0 Resource Server stateless
+
+A API valida Access Tokens JWT emitidos por um sistema externo. O consumidor
+obtém o token pelo fluxo Client Credentials no emissor e envia
+`Authorization: Bearer <token>` em cada chamada protegida. A API não cria sessão,
+não reutiliza autenticação de `HttpSession` e não oferece login, logout ou emissão
+de tokens. HTTP Basic e o cache de requisições estão desativados.
+CSRF está desativado porque a autenticação usa exclusivamente o header Bearer,
+sem cookies de autenticação enviados automaticamente pelo navegador. CORS mantém
+a integração padrão do Spring; nenhuma origem adicional é liberada nesta tarefa.
+
+As demais rotas exigem autenticação, incluindo Actuator sensível e Prometheus.
+Swagger/OpenAPI e health/probes preservam o acesso público existente.
+Esta etapa configura somente a base stateless; as regras `requests/read` e
+`requests/write` e validações específicas do emissor, como `token_use` do Cognito,
+dependem das próximas etapas e do contrato adotado.
+
+Veja [Configuração JWT e demonstração local](docs/resource-server.md) para variáveis
+de ambiente, JWKS, audience e geração de chave/token efêmeros fora do repositório.
+Sem configuração de um decoder confiável, a aplicação não inicia.
+
+Os testes unitários novos exercitam a configuração e seus filtros em memória,
+com tokens realmente assinados, sem Spring Boot, banco, Docker ou rede:
+
+```bash
+bash ./mvnw -Dtest=StatelessResourceServerUnitTests,LocalJwtDecoderUnitTests test
+```
 
 ## Testes e integração contínua
 
@@ -1344,7 +1369,7 @@ de criação e rejeição de gravação obsoleta entre dois contextos de persist
 real, sem transação de teste, para verificar commit, `PENDING`, proprietário
 autenticado, auditoria, `201`, `Location` e os sete campos públicos. Também verifica
 `400` sem inserção para campos inválidos/controlados pelo servidor, além de
-preservação da autenticação e da proteção CSRF.
+preservação da autenticação e criação autenticada sem token CSRF.
 Os testes de repetição cobrem os quatro status, comparando todos os campos
 armazenados antes e depois e exigindo zero chamadas ao WireMock. Também cobrem
 divergência de cliente/produto (incluindo espaços), colisão entre consumidores

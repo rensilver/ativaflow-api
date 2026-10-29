@@ -180,7 +180,7 @@ class ErrorDisclosureProtectionUnitTests {
 		var response = new MockHttpServletResponse();
 		if (status == 401) {
 			handler.commence(request, response, new BadCredentialsException(PRIVATE_DETAIL));
-			assertThat(response.getHeader(HttpHeaders.WWW_AUTHENTICATE)).isEqualTo("Basic realm=\"Realm\"");
+			assertThat(response.getHeader(HttpHeaders.WWW_AUTHENTICATE)).isEqualTo("Bearer");
 		}
 		else {
 			handler.handle(request, response, new AccessDeniedException(PRIVATE_DETAIL));

@@ -612,11 +612,11 @@ class CreateActivationRequestEndpointTests {
 	}
 
 	@Test
-	void preservesCsrfProtectionWithoutPersisting() throws Exception {
+	void authenticatedCreationDoesNotRequireCsrfToken() throws Exception {
 		mockMvc.perform(post(PATH).with(user(CONSUMER))
 				.contentType(MediaType.APPLICATION_JSON).content(PAYLOAD))
-				.andExpect(status().isForbidden());
-		assertThat(storedRequestCount()).isZero();
+				.andExpect(status().isCreated());
+		assertThat(storedRequestCount()).isEqualTo(1L);
 	}
 
 	@Nullable

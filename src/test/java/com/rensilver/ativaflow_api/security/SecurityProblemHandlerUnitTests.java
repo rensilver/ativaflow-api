@@ -1,7 +1,5 @@
 package com.rensilver.ativaflow_api.security;
 
-import java.nio.charset.StandardCharsets;
-import java.util.Base64;
 import java.util.UUID;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -18,12 +16,12 @@ import org.springframework.mock.web.MockHttpServletRequest;
 import org.springframework.mock.web.MockHttpServletResponse;
 import org.springframework.security.access.AccessDeniedException;
 import org.springframework.security.authentication.AnonymousAuthenticationToken;
-import org.springframework.security.authentication.BadCredentialsException;
 import org.springframework.security.authentication.UsernamePasswordAuthenticationToken;
 import org.springframework.security.core.authority.AuthorityUtils;
 import org.springframework.security.core.context.SecurityContextHolder;
+import org.springframework.security.oauth2.server.resource.InvalidBearerTokenException;
+import org.springframework.security.oauth2.server.resource.web.authentication.BearerTokenAuthenticationFilter;
 import org.springframework.security.web.access.ExceptionTranslationFilter;
-import org.springframework.security.web.authentication.www.BasicAuthenticationFilter;
 import org.springframework.security.web.csrf.CsrfFilter;
 import org.springframework.security.web.csrf.HttpSessionCsrfTokenRepository;
 import org.springframework.security.web.savedrequest.NullRequestCache;
@@ -58,19 +56,19 @@ class SecurityProblemHandlerUnitTests {
 				}));
 
 		assertProblem(response, 401, "Unauthorized", "Authentication is required");
-		assertThat(response.getHeader(HttpHeaders.WWW_AUTHENTICATE)).isEqualTo("Basic realm=\"Realm\"");
+		assertThat(response.getHeader(HttpHeaders.WWW_AUTHENTICATE)).isEqualTo("Bearer");
 		assertThat(response.getHeader(HttpHeaders.LOCATION)).isNull();
 	}
 
 	@Test
-	void invalidBasicCredentialsReturnSafeProblemWithChallenge() throws Exception {
+	void invalidBearerTokenReturnsSafeProblemWithChallenge() throws Exception {
 		var request = request("GET");
-		request.addHeader(HttpHeaders.AUTHORIZATION, "Basic " + Base64.getEncoder()
-				.encodeToString("user:secret".getBytes(StandardCharsets.UTF_8)));
+		request.addHeader(HttpHeaders.AUTHORIZATION, "Bearer secret");
 		var response = new MockHttpServletResponse();
-		var filter = new BasicAuthenticationFilter(authentication -> {
-			throw new BadCredentialsException("password=secret");
-		}, handler);
+		var filter = new BearerTokenAuthenticationFilter(authentication -> {
+			throw new InvalidBearerTokenException("token=secret");
+		});
+		filter.setAuthenticationEntryPoint(handler);
 
 		new CorrelationIdFilter().doFilter(request, response, (req, res) ->
 				filter.doFilter(req, res, (ignoredRequest, ignoredResponse) -> {
@@ -78,7 +76,8 @@ class SecurityProblemHandlerUnitTests {
 				}));
 
 		assertProblem(response, 401, "Unauthorized", "Authentication is required");
-		assertThat(response.getHeader(HttpHeaders.WWW_AUTHENTICATE)).isEqualTo("Basic realm=\"Realm\"");
+		assertThat(response.getHeader(HttpHeaders.WWW_AUTHENTICATE)).contains("Bearer", "invalid_token")
+				.doesNotContain("secret");
 	}
 
 	@Test
@@ -96,7 +95,7 @@ class SecurityProblemHandlerUnitTests {
 					}));
 
 			assertProblem(response, 403, "Forbidden", "Access is denied");
-			assertThat(response.getHeader(HttpHeaders.WWW_AUTHENTICATE)).isNull();
+			assertThat(response.getHeader(HttpHeaders.WWW_AUTHENTICATE)).isEqualTo("Bearer");
 			assertThat(logs.events()).singleElement().satisfies(event -> {
 				assertThat(LogCapture.fields(event)).containsEntry("status", 403).containsEntry("correlationId", "security-problem-test");
 				assertThat(event.getFormattedMessage()).doesNotContain("secret");
