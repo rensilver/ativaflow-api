@@ -1179,6 +1179,16 @@ do Git. Veja o [roteiro JWT local](docs/local-jwt.md) para o modo JWKS, chamadas
 autenticadas, renovação e remoção dos arquivos ao terminar. O roteiro exige Bash
 e permissões POSIX (Linux/macOS); o modo JWKS usa também Python 3.
 
+### Imagem Docker da API
+
+O [guia da imagem Java 21](docs/container-image.md) descreve o build multi-stage,
+o runtime não-root, a configuração por ambiente e a validação com PostgreSQL,
+JWT e shutdown gracioso. Para construir a imagem a partir dos fontes:
+
+```bash
+docker build -t ativaflow-api:local .
+```
+
 ### Provedor simulado no Compose
 
 Com Docker Engine e Docker Compose disponíveis, execute na raiz do repositório:

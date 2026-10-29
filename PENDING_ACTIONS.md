@@ -19,9 +19,11 @@ Revisão de `CHECKLIST.md` confrontada com código, testes, configurações, REA
 
 ### A01 — Empacotamento e execução reproduzível
 
-- [ ] **[P0] Criar `Dockerfile` Java 21 e validar a imagem.** Não há Dockerfile. Adotar build multi-stage, runtime não-root e `.dockerignore` para completar os diferenciais associados sem uma segunda implementação.
+- [x] **[P0] Criar `Dockerfile` Java 21 e validar a imagem.** Implementado build multi-stage com Maven Wrapper/JDK 21, runtime JRE 21 não-root (`10001:10001`) e `.dockerignore` com contexto restrito. Build e execução documentados em [Imagem Docker Java 21](docs/container-image.md).
 - [ ] **[P1] Completar `docker-compose.yaml` com `app` e PostgreSQL.** Hoje existe somente `activation-provider-mock`. Adicionar volume do banco, healthchecks, dependências e URLs internas; manter a publicação do mock restrita ao loopback.
 - [ ] **[P0] Documentar e demonstrar a execução completa.** Integrar o roteiro de chave/token local existente em `docs/local-jwt.md` ao container da API, incluindo montagem da chave pública e configuração de issuer/audience. Comprovar criação autenticada, consulta e ativação pelo mock. Verificar shutdown, restart e preservação dos dados/pendências sem apagar volumes inadvertidamente.
+
+**Validação da imagem (29/10/2026):** `clean verify` passou com 949 testes, 0 falhas, 0 erros e 0 ignorados. BuildKit validou o Dockerfile sem avisos e construiu `ativaflow-api:local`. O smoke test em Linux/amd64 confirmou Java 21.0.13, usuário não-root, JAR somente leitura, ausência de Maven/JDK no runtime, health `UP`, HTTP 401 sem token e GET 200 com JWT RS256. Com PostgreSQL e WireMock isolados, o POST retornou 201 e o worker concluiu a solicitação em `COMPLETED`. A API executou com filesystem somente leitura, `cap-drop ALL` e 512 MiB; SIGTERM concluiu o shutdown gracioso (exit 143, sem OOM). Containers, rede, volumes de teste e material JWT temporário foram removidos. Compose completo e validação de restart/preservação continuam nos demais itens de A01.
 
 **Aceite:** imagem executável e procedimento reproduzível; com o Compose completo, `docker compose up --build` inicia os três serviços e permite demonstrar o fluxo autenticado.
 
