@@ -486,19 +486,61 @@ persistidos, sem normalização:
 O sucesso padrão é **`204 No Content`, sem corpo**, confirmando ativação concluída.
 Nenhum campo de resposta é obrigatório; não há schema de erro presumido.
 
-| Cenário | Tratamento definido para a futura integração |
-| --- | --- |
-| `204` (padrão), `200` ou `201` | Confirmam conclusão no contrato simulado: `COMPLETED`, sem retry; corpo dispensável. |
-| `202 Accepted` | Não confirma conclusão; `PROCESSING` com reconciliação, sem reenvio automático. |
-| `400` | No mock, rejeição permanente sem ativação: `FAILED`, sem retry. |
-| `500` | Efeito potencialmente aplicado: `PROCESSING` com reconciliação, sem reenvio automático. |
-| `429` ou `503` | No cliente atual, `PROCESSING` com reconciliação, sem reenvio automático, inclusive com `Retry-After`. Uma garantia de não ativação simulada no mock não é inferida pela URL configurada. |
-| Timeout, resposta não contratada ou erro sem garantia de não ativação | `PROCESSING` com reconciliação, sem retry automático. |
+### Matriz HTTP → status → retry → justificativa
 
-A garantia do mock não se transfere a um provedor real ao mudar a URL base.
-`externalId` não garante idempotência externa. O mock não exige autenticação;
-o mecanismo real precisa ser contratado, e o JWT do consumidor não é encaminhado.
-A ADR detalha campos, headers, `Retry-After`, limites e critérios futuros de teste.
+A matriz descreve o comportamento implementado de `HttpActivationProviderClient`
+e o status local após o worker persistir o resultado. HTTP refere-se à resposta de
+`POST /provider/v1/activate`; falhas externas são tratadas no fluxo assíncrono e
+não são repassadas como o código HTTP da API de criação.
+
+| HTTP ou falha no provedor | Status local | Retry automático | Justificativa |
+| --- | --- | --- | --- |
+| `200 OK`, `201 Created`, `204 No Content` (padrão) | `COMPLETED` | Não. | O contrato assumido confirma ativação concluída (`Success`); o corpo é dispensável. |
+| `202 Accepted` | `PROCESSING`, com reconciliação | Não. | Aceitação não confirma conclusão; resultado `Indeterminate`. |
+| Demais `2xx` | `PROCESSING`, com reconciliação | Não. | Não estão contratados como confirmação de conclusão; resultado `Indeterminate`. |
+| `400 Bad Request` | `FAILED` | Não, em qualquer tentativa. | Supõe-se rejeição definitiva antes da ativação (`PermanentFailure`); `Retry-After` não altera essa decisão. |
+| `429 Too Many Requests` | `PROCESSING`, com reconciliação | Não, mesmo com `Retry-After`. | Limitação de tráfego não comprova ausência de ativação; resultado `Indeterminate`. |
+| `500 Internal Server Error` | `PROCESSING`, com reconciliação | Não, mesmo com `Retry-After`. | A falha pode ocorrer depois da ativação; resultado `Indeterminate`. |
+| `503 Service Unavailable` | `PROCESSING`, com reconciliação | Não, mesmo com `Retry-After`. | Indisponibilidade não comprova ausência de ativação; resultado `Indeterminate`. |
+| Demais respostas, incluindo `3xx`, outros `4xx` e outros `5xx` | `PROCESSING`, com reconciliação | Não. | Sem garantia contratual sobre o efeito externo; resultado `Indeterminate`. Redirecionamentos não são seguidos automaticamente. |
+| Timeout de conexão ou leitura | `PROCESSING`, com reconciliação | Não. | O timeout não comprova cancelamento nem ausência de ativação; resultado `Indeterminate`. |
+| Falha de comunicação sem resposta HTTP confiável | `PROCESSING`, com reconciliação | Não. | O efeito externo permanece desconhecido; resultado `Indeterminate`. |
+
+Reconciliação significa `reconciliation_required=true` e `next_attempt_at=null`:
+o worker não pode adquirir a solicitação para reenvio. Os estados da matriz
+pressupõem gravação com posse, versão e lease válidos. Se a gravação falhar ou
+retornar `false`, o resultado não está confirmado no banco; a proteção preventiva
+da preparação permanece, sem autorizar novo envio.
+
+### Suposições e limitações da matriz
+
+- Não existe contrato oficial adicional do provedor. Sucesso em `200/201/204` e
+  rejeição sem ativação em `400` são suposições do projeto e do mock, registradas
+  na ADR-0002; precisam ser validadas para um provedor real. Alterar a URL base
+  não comprova essas garantias nem habilita retry para `429/503`.
+- Não há schema de resposta contratado. Corpos de sucesso e erro são ignorados;
+  o cliente não usa mensagens do provedor para decidir status ou retry.
+- `externalId` não garante idempotência externa; a integração não envia
+  `Idempotency-Key` nem garante uma única ativação diante de reenvios. O mock
+  dispensa autenticação; o mecanismo real precisa ser contratado, e o JWT do
+  consumidor não é encaminhado.
+- Cada chamada ao cliente representa uma tentativa, sem retry próprio. Nenhuma
+  resposta HTTP atual produz `TransientFailure`. A aplicação já suporta esse
+  resultado para falhas com garantia contratual explícita de não ativação, mas
+  a classificação HTTP correspondente ainda depende de implementação.
+- Resultados indeterminados permanecem em `PROCESSING`, inclusive após expiração
+  do lease ou esgotamento das tentativas. Não há consulta externa, callback ou
+  reconciliação automática implementada; é necessária intervenção operacional
+  com evidência confiável do efeito externo.
+
+Quando uma integração puder produzir `TransientFailure` com segurança, o serviço
+manterá `PROCESSING` e agendará retry enquanto `attempt_count < maxAttempts`;
+ao atingir o limite, encerrará em `FAILED`, sem agendamento e sem reconciliação.
+São de uma a três tentativas totais (padrão: três, incluindo a inicial), conforme
+`WORKER_RETRY_MAX_ATTEMPTS`. O próximo envio respeita o maior instante entre o
+backoff exponencial com jitter e o `retryAfter` já interpretado, sem antecipar o
+prazo do provedor para caber no teto do backoff. A política e seus padrões estão
+descritos em [Resultados confirmados e agendamento de retries](#resultados-confirmados-e-agendamento-de-retries).
 
 O cliente traduz essa matriz para `ProviderOutcome`, com códigos internos
 `PROVIDER_REJECTED`, `PROVIDER_INTERNAL_ERROR_OUTCOME_UNKNOWN`,
