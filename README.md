@@ -665,8 +665,15 @@ descrição padrão. Para status sem constante em `HttpStatus`, o código numér
 | Outros erros do MVC, como método ou mídia incompatíveis | Status do MVC | Mensagem segura, preservando cabeçalhos como `Allow`. |
 | Falha inesperada ou validação do valor retornado pelo controller | 500 | `An unexpected error occurred`. |
 
-O array `errors` preserva todas as mensagens, inclusive quando um campo viola
-mais de uma restrição. `field` usa o nome público do campo ou parâmetro (incluindo
+O array `errors` preserva uma entrada por violação, inclusive quando um campo viola
+mais de uma restrição. As mensagens são textos públicos fixos selecionados pelo
+código da restrição: `NotBlank`/`NotBlankText` → `Must not be blank`,
+`NotNull` → `Required value is missing`, `Size` → `Invalid length`,
+`Min`/`Max` → `Value out of range` e `Pattern` → `Invalid format`.
+Códigos desconhecidos usam `Invalid value`. Mensagens originais das anotações,
+do validador ou de erros globais não são copiadas: elas podem conter valores
+interpolados, SQL, nomes internos ou segredos.
+`field` usa o nome público do campo ou parâmetro (incluindo
 aliases de `@RequestParam` e `@PathVariable`); erros globais do objeto usam
 `request`. Falhas de conversão de parâmetros usam a mensagem segura `Invalid value`,
 e parâmetros obrigatórios ausentes usam `Required parameter is missing`.
@@ -683,11 +690,27 @@ Exemplo de erro de validação:
   "detail": "Request validation failed",
   "instance": "/api/v1/requests",
   "correlationId": "client-request-123",
-  "errors": [{"field": "customerId", "message": "customerId é obrigatório"}]
+  "errors": [{"field": "customerId", "message": "Must not be blank"}]
 }
 ```
 
-O corpo público não inclui stack traces, SQL ou mensagens internas de exceções.
+O corpo público não inclui stack traces, SQL, nomes de classes internas, chaves,
+tokens, detalhes do provedor ou mensagens internas de exceções. Cabeçalhos de
+exceções também não são repassados indiscriminadamente: o advice preserva `Allow`
+para método incompatível e `Accept`/`Accept-Patch` para mídia incompatível.
+`Retry-After` só é preservado quando contém um único valor de segundos não
+negativos ou uma data HTTP válida. Demais cabeçalhos da exceção, como
+`Authorization`, `Set-Cookie`, `Location` e headers privados do provedor, são descartados.
+O desafio `WWW-Authenticate` continua sob responsabilidade de `SecurityProblemHandler`.
+
+O fallback `/error` também recebe proteção explícita no `application.yaml`, válida
+para todos os profiles: `server.error.include-exception=false` e
+`include-stacktrace`, `include-message`, `include-binding-errors` e `include-path`
+definidos como `never`. Esses controles do [Spring Boot](https://docs.spring.io/spring-boot/3.5/appendix/application-properties/#appendix.application-properties.server.server.error.include-stacktrace)
+impedem que os defaults do DevTools ou parâmetros como `?trace=true&message=true`
+exponham detalhes no fallback. Configurações externas de maior precedência devem
+manter esses valores.
+
 Rejeições geram `api_request_rejected` em `WARN`, com `status` e `correlationId`,
 sem registrar payload ou valores rejeitados. Falhas 5xx geram
 `api_request_failed` em `ERROR`, com a exceção detalhada no log interno.
@@ -723,6 +746,18 @@ interna sensível e falha inesperada sem mensagem. Para executar somente essa su
 
 ```bash
 bash ./mvnw -Dtest=SafeErrorResponsesUnitTests test
+```
+
+`ErrorDisclosureProtectionUnitTests` cobre mensagens sensíveis de validação no
+body, query, path e erros globais; respostas e cabeçalhos privados de exceções;
+`Retry-After` válido/inválido; preservação de `Allow`, `Accept` e `Accept-Patch`;
+falhas de banco/provedor; respostas 401/403; e o fallback `/error` em JSON e HTML
+com defaults de desenvolvimento e parâmetros de depuração.
+Os testes usam componentes em memória, sem iniciar Spring Boot, banco ou provedor.
+Para executar somente os testes criados nesta tarefa:
+
+```bash
+bash ./mvnw -Dtest=ErrorDisclosureProtectionUnitTests test
 ```
 
 Os testes adicionados para a padronização exercitam negociação de conteúdo,

@@ -1,12 +1,17 @@
 package com.rensilver.ativaflow_api.exception;
 
 import java.net.URI;
+import java.time.ZonedDateTime;
+import java.time.format.DateTimeFormatter;
+import java.time.format.DateTimeParseException;
 import java.util.List;
+import java.util.Map;
 import java.util.UUID;
 
 import com.rensilver.ativaflow_api.observability.CorrelationId;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.TypeMismatchException;
+import org.springframework.context.MessageSourceResolvable;
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.HttpStatusCode;
@@ -26,6 +31,8 @@ import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestControllerAdvice;
 import org.springframework.web.bind.MethodArgumentNotValidException;
 import org.springframework.web.bind.MissingServletRequestParameterException;
+import org.springframework.web.HttpMediaTypeNotSupportedException;
+import org.springframework.web.HttpRequestMethodNotSupportedException;
 import org.springframework.web.context.request.ServletWebRequest;
 import org.springframework.web.context.request.WebRequest;
 import org.springframework.web.method.annotation.HandlerMethodValidationException;
@@ -38,6 +45,15 @@ import org.springframework.web.servlet.mvc.method.annotation.ResponseEntityExcep
 public class ApiExceptionHandler extends ResponseEntityExceptionHandler {
 
 	private static final URI VALIDATION_ERROR_TYPE = URI.create("urn:ativaflow:problem:validation-error");
+	// Apenas textos públicos fixos: mensagens interpoladas podem carregar valores e detalhes internos.
+	private static final Map<String, String> VALIDATION_MESSAGES = Map.of(
+			"NotBlank", "Must not be blank",
+			"NotBlankText", "Must not be blank",
+			"NotNull", "Required value is missing",
+			"Size", "Invalid length",
+			"Min", "Value out of range",
+			"Max", "Value out of range",
+			"Pattern", "Invalid format");
 
 	@ExceptionHandler(ActivationRequestConflictException.class)
 	public ResponseEntity<Object> handleConflict(ActivationRequestConflictException exception, WebRequest request) {
@@ -90,11 +106,50 @@ public class ApiExceptionHandler extends ResponseEntityExceptionHandler {
 					.log("api_request_rejected");
 		}
 
-		HttpHeaders responseHeaders = new HttpHeaders();
-		responseHeaders.putAll(headers);
+		HttpHeaders responseHeaders = safeHeaders(exception, headers);
 		responseHeaders.setContentType(MediaType.APPLICATION_PROBLEM_JSON);
 		responseHeaders.set(CorrelationId.HEADER, correlationId);
 		return super.handleExceptionInternal(exception, problem, responseHeaders, status, request);
+	}
+
+	private HttpHeaders safeHeaders(Exception exception, HttpHeaders headers) {
+		HttpHeaders safe = new HttpHeaders();
+		// Os cabeçalhos de negociação são gerados pelo MVC, não por erros arbitrários da integração.
+		if (exception instanceof HttpRequestMethodNotSupportedException) {
+			copyHeader(headers, safe, HttpHeaders.ALLOW);
+		}
+		if (exception instanceof HttpMediaTypeNotSupportedException) {
+			copyHeader(headers, safe, HttpHeaders.ACCEPT);
+			copyHeader(headers, safe, HttpHeaders.ACCEPT_PATCH);
+		}
+		List<String> retryAfter = headers.get(HttpHeaders.RETRY_AFTER);
+		if (retryAfter != null && retryAfter.size() == 1 && isSafeRetryAfter(retryAfter.getFirst())) {
+			safe.set(HttpHeaders.RETRY_AFTER, retryAfter.getFirst());
+		}
+		return safe;
+	}
+
+	private void copyHeader(HttpHeaders source, HttpHeaders target, String name) {
+		List<String> values = source.get(name);
+		if (values != null) {
+			target.put(name, List.copyOf(values));
+		}
+	}
+
+	private boolean isSafeRetryAfter(String value) {
+		if (value.length() > 128) {
+			return false;
+		}
+		if (value.matches("[0-9]+")) {
+			return true;
+		}
+		try {
+			ZonedDateTime.parse(value, DateTimeFormatter.RFC_1123_DATE_TIME);
+			return true;
+		}
+		catch (DateTimeParseException ignored) {
+			return false;
+		}
 	}
 
 	private String safeDetail(Exception exception, HttpStatusCode status) {
@@ -133,7 +188,7 @@ public class ApiExceptionHandler extends ResponseEntityExceptionHandler {
 				}
 				String publicField = field != null ? field : "request";
 				return result.getResolvableErrors().stream().map(error ->
-						new ValidationError(publicField, safeValidationMessage(error.getDefaultMessage())));
+						new ValidationError(publicField, safeValidationMessage(error)));
 			}).toList();
 		}
 		if (exception instanceof MethodArgumentTypeMismatchException mismatch) {
@@ -147,11 +202,20 @@ public class ApiExceptionHandler extends ResponseEntityExceptionHandler {
 
 	private ValidationError validationError(ObjectError error) {
 		return new ValidationError(error instanceof FieldError fieldError ? fieldError.getField() : "request",
-				safeValidationMessage(error.getDefaultMessage()));
+				safeValidationMessage(error));
 	}
 
-	private String safeValidationMessage(@Nullable String message) {
-		return message != null ? message : "Invalid value";
+	private String safeValidationMessage(MessageSourceResolvable error) {
+		String[] codes = error.getCodes();
+		if (codes != null) {
+			for (String code : codes) {
+				String message = VALIDATION_MESSAGES.get(code);
+				if (message != null) {
+					return message;
+				}
+			}
+		}
+		return "Invalid value";
 	}
 
 	private record ValidationError(String field, String message) {

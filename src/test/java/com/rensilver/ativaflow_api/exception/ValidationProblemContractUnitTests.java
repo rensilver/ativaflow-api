@@ -133,7 +133,7 @@ class ValidationProblemContractUnitTests {
 				.andExpect(status().isBadRequest())
 				.andExpect(jsonPath("$.type").value("urn:ativaflow:problem:validation-error"))
 				.andExpect(jsonPath("$.errors[*].field", containsInAnyOrder("name", "name")))
-				.andExpect(jsonPath("$.errors[*].message", containsInAnyOrder("Name is required", "Name is too short")));
+				.andExpect(jsonPath("$.errors[*].message", containsInAnyOrder("Must not be blank", "Invalid length")));
 	}
 
 	@Test
