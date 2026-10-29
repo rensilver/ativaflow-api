@@ -67,7 +67,7 @@ public class ActivationRequestService {
 				throw exception;
 			}
 			// A transação de inserção já terminou com rollback; a consulta usa uma nova transação.
-			return repository.findByExternalIdAndConsumerId(request.externalId(), trustedConsumerId)
+			return repository.findWinnerByExternalIdAndConsumerId(request.externalId(), trustedConsumerId)
 					.map(entity -> reuseExisting(entity, request, trustedConsumerId))
 					.orElseThrow(ActivationRequestConflictException::new);
 		}

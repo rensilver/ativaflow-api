@@ -4,6 +4,7 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.UUID;
 
+import com.rensilver.ativaflow_api.config.JpaAuditingConfiguration;
 import com.rensilver.ativaflow_api.domain.ActivationStatus;
 import com.rensilver.ativaflow_api.model.ActivationRequest;
 import com.rensilver.ativaflow_api.repository.ActivationRequestRepository;
@@ -18,11 +19,17 @@ import org.springframework.context.annotation.Import;
 import org.springframework.data.domain.PageRequest;
 import org.springframework.data.domain.Sort;
 import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.test.context.ActiveProfiles;
+import org.springframework.transaction.PlatformTransactionManager;
+import org.springframework.transaction.annotation.Propagation;
+import org.springframework.transaction.annotation.Transactional;
+import org.springframework.transaction.support.TransactionTemplate;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
-@Import(TestcontainersConfiguration.class)
+@Import({TestcontainersConfiguration.class, JpaAuditingConfiguration.class})
 @DataJpaTest(properties = {
 		"spring.jpa.properties.hibernate.session_factory.statement_inspector="
 				+ "com.rensilver.ativaflow_api.ActivationRequestQueryTests$SqlCapture"
@@ -36,6 +43,44 @@ class ActivationRequestQueryTests {
 
 	@Autowired
 	private JdbcTemplate jdbcTemplate;
+
+	@Autowired
+	private PlatformTransactionManager transactionManager;
+
+	@Test
+	@Transactional(propagation = Propagation.NOT_SUPPORTED)
+	void winnerLookupUsesNewTransactionWhenCallerWasInvalidatedByUniqueConstraint() {
+		var winner = repository.saveAndFlush(
+				ActivationRequest.create("EXT-RECOVERY", "CUSTOMER-1", "PRODUCT-1", "consumer-a"));
+		try {
+			new TransactionTemplate(transactionManager).executeWithoutResult(transaction -> {
+				assertThatThrownBy(() -> repository.saveAndFlush(
+						ActivationRequest.create("EXT-RECOVERY", "CUSTOMER-1", "PRODUCT-1", "consumer-a")))
+						.isInstanceOf(DataIntegrityViolationException.class);
+				assertThat(transaction.isRollbackOnly()).isTrue();
+				transaction.setRollbackOnly();
+
+				var recovered = repository.findWinnerByExternalIdAndConsumerId("EXT-RECOVERY", "consumer-a")
+						.orElseThrow();
+				assertThat(recovered.getId()).isEqualTo(winner.getId());
+				assertThat(recovered.getCustomerId()).isEqualTo("CUSTOMER-1");
+				assertThat(recovered.getProductCode()).isEqualTo("PRODUCT-1");
+				assertThat(repository.findWinnerByExternalIdAndConsumerId("EXT-RECOVERY", "consumer-b")).isEmpty();
+				assertThat(repository.findWinnerByExternalIdAndConsumerId("EXT-MISSING", "consumer-a")).isEmpty();
+
+				// A releitura suspende a transação inválida, sem recuperá-la nem confirmá-la.
+				assertThatThrownBy(() -> jdbcTemplate.queryForObject("SELECT 1", Integer.class))
+						.hasRootCauseInstanceOf(java.sql.SQLException.class)
+						.satisfies(failure -> assertThat(((java.sql.SQLException) failure.getCause()).getSQLState())
+								.isEqualTo("25P02"));
+			});
+			assertThat(jdbcTemplate.queryForObject(
+					"SELECT COUNT(*) FROM activation_requests WHERE external_id = 'EXT-RECOVERY'", Long.class))
+					.isEqualTo(1);
+		} finally {
+			repository.deleteById(winner.getId());
+		}
+	}
 
 	@Test
 	void externalIdLookupOnlyReturnsRecordsOwnedByTheAuthenticatedConsumer() {

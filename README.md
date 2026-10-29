@@ -330,7 +330,8 @@ disponível, mas não identifica o proprietário nem confirma cliente, produto o
 A consulta prévia evita inserções desnecessárias para o mesmo consumidor, mas
 não garante unicidade entre chamadas simultâneas. A inserção usa uma transação
 própria: se perder a disputa pela constraint `uk_activation_requests_external_id`, termina com
-rollback antes de uma nova consulta transacional ao registro confirmado.
+rollback antes da releitura do registro confirmado. Essa releitura usa
+`REQUIRES_NEW` e `readOnly = true`, sem aderir a uma transação chamadora invalidada.
 Aplicam-se então as mesmas regras de `200` ou `409`. Se a releitura não encontrar
 um registro do consumidor autenticado, a resposta também será o `409` genérico,
 inclusive se a linha tiver sido removida entre a colisão e a releitura. Outras

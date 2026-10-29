@@ -13,6 +13,7 @@ import org.springframework.data.domain.Pageable;
 import org.springframework.data.jpa.repository.JpaRepository;
 import org.springframework.data.jpa.repository.JpaSpecificationExecutor;
 import org.springframework.lang.Nullable;
+import org.springframework.transaction.annotation.Propagation;
 import org.springframework.transaction.annotation.Transactional;
 
 public interface ActivationRequestRepository extends JpaRepository<ActivationRequest, UUID>,
@@ -22,6 +23,10 @@ public interface ActivationRequestRepository extends JpaRepository<ActivationReq
 
 	@Transactional(readOnly = true)
 	Optional<ActivationRequest> findByExternalIdAndConsumerId(String externalId, String consumerId);
+
+	/** Relê o vencedor sem aderir à transação que sofreu a violação de unicidade. */
+	@Transactional(readOnly = true, propagation = Propagation.REQUIRES_NEW)
+	Optional<ActivationRequest> findWinnerByExternalIdAndConsumerId(String externalId, String consumerId);
 
 	/** Aplica o mesmo escopo de consumidor ao conteúdo e à contagem, apenas com os filtros presentes. */
 	default Page<ActivationRequest> findAllByFilters(String consumerId, @Nullable ActivationStatus status,
