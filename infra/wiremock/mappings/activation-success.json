@@ -1,0 +1,11 @@
+{
+  "name": "activation-success",
+  "priority": 10,
+  "request": {
+    "method": "POST",
+    "url": "/provider/v1/activate"
+  },
+  "response": {
+    "status": 204
+  }
+}
