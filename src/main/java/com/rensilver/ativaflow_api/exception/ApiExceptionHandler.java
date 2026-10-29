@@ -10,6 +10,11 @@ import org.springframework.web.method.annotation.MethodArgumentTypeMismatchExcep
 @RestControllerAdvice
 public class ApiExceptionHandler {
 
+	@ExceptionHandler(ActivationRequestConflictException.class)
+	public ProblemDetail handleConflict(ActivationRequestConflictException exception) {
+		return ProblemDetail.forStatusAndDetail(HttpStatus.CONFLICT, exception.getMessage());
+	}
+
 	@ExceptionHandler({HandlerMethodValidationException.class, MethodArgumentTypeMismatchException.class,
 			InvalidPaginationException.class})
 	public ProblemDetail handleInvalidRequestParameters() {

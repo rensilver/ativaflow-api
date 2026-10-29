@@ -13,11 +13,15 @@ import org.springframework.data.domain.Pageable;
 import org.springframework.data.jpa.repository.JpaRepository;
 import org.springframework.data.jpa.repository.JpaSpecificationExecutor;
 import org.springframework.lang.Nullable;
+import org.springframework.transaction.annotation.Transactional;
 
 public interface ActivationRequestRepository extends JpaRepository<ActivationRequest, UUID>,
 		JpaSpecificationExecutor<ActivationRequest> {
 
 	Optional<ActivationRequest> findByIdAndConsumerId(UUID id, String consumerId);
+
+	@Transactional(readOnly = true)
+	Optional<ActivationRequest> findByExternalId(String externalId);
 
 	/** Aplica o mesmo escopo de consumidor ao conteúdo e à contagem, apenas com os filtros presentes. */
 	default Page<ActivationRequest> findAllByFilters(String consumerId, @Nullable ActivationStatus status,

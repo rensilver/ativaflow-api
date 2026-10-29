@@ -52,7 +52,11 @@ public class ActivationRequestController {
 	@PostMapping
 	public ResponseEntity<ActivationRequestResponse> createActivationRequest(
 			@Valid @RequestBody CreateActivationRequest request, Principal principal) {
-		ActivationRequestResponse created = service.createActivationRequest(request, principal.getName());
+		var result = service.createActivationRequest(request, principal.getName());
+		if (!result.created()) {
+			return ResponseEntity.ok(result.response());
+		}
+		ActivationRequestResponse created = result.response();
 		URI location = UriComponentsBuilder.fromPath("/api/v1/requests/{id}")
 				.buildAndExpand(created.id()).toUri();
 		return ResponseEntity.created(location).body(created);

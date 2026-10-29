@@ -4,19 +4,27 @@ import java.time.Clock;
 import java.time.Instant;
 import java.time.OffsetDateTime;
 import java.time.ZoneOffset;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.UUID;
+import java.util.concurrent.CyclicBarrier;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import java.util.concurrent.TimeUnit;
 import java.util.stream.Stream;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import com.github.tomakehurst.wiremock.junit5.WireMockExtension;
 import com.rensilver.ativaflow_api.controller.ActivationRequestController;
+import com.rensilver.ativaflow_api.domain.ActivationStatus;
 import com.rensilver.ativaflow_api.dto.response.ActivationRequestResponse;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.RegisterExtension;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.Arguments;
+import org.junit.jupiter.params.provider.EnumSource;
 import org.junit.jupiter.params.provider.MethodSource;
 import org.junit.jupiter.params.provider.ValueSource;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -37,7 +45,11 @@ import org.springframework.lang.Nullable;
 import org.springframework.test.context.ActiveProfiles;
 import org.springframework.test.context.DynamicPropertyRegistry;
 import org.springframework.test.context.DynamicPropertySource;
+import org.springframework.test.json.JsonCompareMode;
 import org.springframework.test.web.servlet.MockMvc;
+import org.springframework.test.web.servlet.MvcResult;
+import org.springframework.transaction.PlatformTransactionManager;
+import org.springframework.transaction.support.TransactionTemplate;
 import org.springframework.transaction.support.TransactionSynchronizationManager;
 import org.springframework.web.bind.annotation.ControllerAdvice;
 import org.springframework.web.bind.annotation.PostMapping;
@@ -50,6 +62,7 @@ import static com.github.tomakehurst.wiremock.client.WireMock.request;
 import static com.github.tomakehurst.wiremock.client.WireMock.urlEqualTo;
 import static com.github.tomakehurst.wiremock.core.WireMockConfiguration.wireMockConfig;
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.awaitility.Awaitility.await;
 import static org.springframework.security.test.web.servlet.request.SecurityMockMvcRequestPostProcessors.csrf;
 import static org.springframework.security.test.web.servlet.request.SecurityMockMvcRequestPostProcessors.user;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
@@ -91,6 +104,9 @@ class CreateActivationRequestEndpointTests {
 
 	@Autowired
 	private JdbcTemplate jdbcTemplate;
+
+	@Autowired
+	private PlatformTransactionManager transactionManager;
 
 	@AfterEach
 	void removeCreatedRequests() {
@@ -158,6 +174,40 @@ class CreateActivationRequestEndpointTests {
 		provider.verify(0, anyRequestedFor(anyUrl()));
 	}
 
+	@ParameterizedTest
+	@EnumSource(ActivationStatus.class)
+	void identicalRepetitionReturnsCurrentRecordWithoutChangingOrReactivatingIt(ActivationStatus activationStatus)
+			throws Exception {
+		var created = mockMvc.perform(post(PATH).with(user(CONSUMER)).with(csrf())
+				.contentType(MediaType.APPLICATION_JSON).content(PAYLOAD))
+				.andExpect(status().isCreated()).andReturn().getResponse().getContentAsString();
+		UUID id = UUID.fromString(objectMapper.readTree(created).get("id").asText());
+		jdbcTemplate.update("""
+				UPDATE activation_requests SET status = ?, updated_at = ?, version = 4,
+				attempt_count = 2, next_attempt_at = ?, lease_until = ?, claimed_by = 'worker-1',
+				last_error_code = 'PROVIDER_TIMEOUT', reconciliation_required = true WHERE id = ?
+				""", activationStatus.name(), OffsetDateTime.ofInstant(PROCESSED_AT, ZoneOffset.UTC),
+				OffsetDateTime.ofInstant(PROCESSED_AT, ZoneOffset.UTC),
+				OffsetDateTime.ofInstant(PROCESSED_AT, ZoneOffset.UTC), id);
+		var storedBefore = jdbcTemplate.queryForMap("SELECT * FROM activation_requests WHERE id = ?", id);
+		var expected = (ObjectNode) objectMapper.readTree(created);
+		expected.put("status", activationStatus.name());
+		expected.put("updatedAt", PROCESSED_AT.toString());
+
+		for (int repetition = 0; repetition < 2; repetition++) {
+			mockMvc.perform(post(PATH).with(user(CONSUMER)).with(csrf())
+					.contentType(MediaType.APPLICATION_JSON).content(PAYLOAD))
+					.andExpect(status().isOk())
+					.andExpect(content().contentTypeCompatibleWith(MediaType.APPLICATION_JSON))
+					.andExpect(content().json(objectMapper.writeValueAsString(expected), JsonCompareMode.STRICT));
+		}
+
+		assertThat(storedRequestCount()).isEqualTo(1);
+		assertThat(jdbcTemplate.queryForMap("SELECT * FROM activation_requests WHERE id = ?", id))
+				.isEqualTo(storedBefore);
+		provider.verify(0, anyRequestedFor(anyUrl()));
+	}
+
 	@Test
 	void returnsCreationSnapshotWhenProcessingFinishesBeforeSerialization() throws Exception {
 		var payload = (ObjectNode) objectMapper.readTree(PAYLOAD);
@@ -183,6 +233,108 @@ class CreateActivationRequestEndpointTests {
 					assertThat(rs.getObject("updated_at", OffsetDateTime.class).toInstant()).isEqualTo(PROCESSED_AT);
 					return id;
 				}, id);
+		provider.verify(0, anyRequestedFor(anyUrl()));
+	}
+
+	@ParameterizedTest
+	@ValueSource(strings = {"customerId", "productCode", "consumerId"})
+	void rejectsRepetitionWithDifferentContentOrConsumerWithoutExposingOrChangingRecord(String changedField)
+			throws Exception {
+		mockMvc.perform(post(PATH).with(user(CONSUMER)).with(csrf())
+				.contentType(MediaType.APPLICATION_JSON).content(PAYLOAD))
+				.andExpect(status().isCreated());
+		var storedBefore = jdbcTemplate.queryForMap(
+				"SELECT * FROM activation_requests WHERE consumer_id = ?", CONSUMER);
+		var payload = (ObjectNode) objectMapper.readTree(PAYLOAD);
+		String consumer = CONSUMER;
+		if (changedField.equals("consumerId")) {
+			consumer = "other-consumer";
+		}
+		else {
+			payload.put(changedField, payload.get(changedField).asText() + " ");
+		}
+
+		mockMvc.perform(post(PATH).with(user(consumer)).with(csrf())
+				.contentType(MediaType.APPLICATION_JSON).content(objectMapper.writeValueAsString(payload)))
+				.andExpect(status().isConflict())
+				.andExpect(content().contentTypeCompatibleWith(MediaType.APPLICATION_PROBLEM_JSON))
+				.andExpect(jsonPath("$.status").value(409))
+				.andExpect(jsonPath("$.detail").value("Activation request conflict"))
+				.andExpect(jsonPath("$.id").doesNotExist())
+				.andExpect(jsonPath("$.customerId").doesNotExist())
+				.andExpect(jsonPath("$.productCode").doesNotExist());
+
+		assertThat(jdbcTemplate.queryForMap(
+				"SELECT * FROM activation_requests WHERE consumer_id = ?", CONSUMER)).isEqualTo(storedBefore);
+		assertThat(jdbcTemplate.queryForObject(
+				"SELECT COUNT(*) FROM activation_requests WHERE external_id = ?", Long.class, " EXT-12345 "))
+				.isEqualTo(1);
+		provider.verify(0, anyRequestedFor(anyUrl()));
+	}
+
+	@Test
+	void concurrentIdenticalRequestsCreateOneRecordAndReturnItToEveryCaller() throws Exception {
+		int callers = 4;
+		var start = new CyclicBarrier(callers);
+		try (var executor = Executors.newFixedThreadPool(callers)) {
+			List<Future<MvcResult>> futures = new ArrayList<>();
+			for (int caller = 0; caller < callers; caller++) {
+				futures.add(executor.submit(() -> {
+					start.await(10, TimeUnit.SECONDS);
+					return mockMvc.perform(post(PATH).with(user(CONSUMER)).with(csrf())
+							.contentType(MediaType.APPLICATION_JSON).content(PAYLOAD)).andReturn();
+				}));
+			}
+			List<MvcResult> results = new ArrayList<>();
+			for (var future : futures) {
+				results.add(future.get(20, TimeUnit.SECONDS));
+			}
+			assertThat(results).extracting(result -> result.getResponse().getStatus())
+					.containsExactlyInAnyOrder(201, 200, 200, 200);
+			var expected = objectMapper.readTree(results.getFirst().getResponse().getContentAsString());
+			for (var result : results) {
+				assertThat(objectMapper.readTree(result.getResponse().getContentAsString())).isEqualTo(expected);
+			}
+		}
+		assertThat(storedRequestCount()).isEqualTo(1);
+		provider.verify(0, anyRequestedFor(anyUrl()));
+	}
+
+	@Test
+	void identicalRequestsLosingUniqueConstraintRaceReturnCommittedRecordAfterRollback() throws Exception {
+		UUID id = UUID.randomUUID();
+		try (var executor = Executors.newFixedThreadPool(3)) {
+			List<Future<MvcResult>> futures = new ArrayList<>();
+			new TransactionTemplate(transactionManager).executeWithoutResult(transaction -> {
+				jdbcTemplate.update("""
+						INSERT INTO activation_requests
+						(id, external_id, customer_id, product_code, consumer_id, created_at, updated_at)
+						VALUES (?, ?, ?, ?, ?, ?, ?)
+						""", id, " EXT-12345 ", "CUST-10001", "INTERNET-500", CONSUMER,
+						OffsetDateTime.ofInstant(CREATED_AT, ZoneOffset.UTC),
+						OffsetDateTime.ofInstant(CREATED_AT, ZoneOffset.UTC));
+				for (int caller = 0; caller < 3; caller++) {
+					futures.add(executor.submit(() -> mockMvc.perform(post(PATH).with(user(CONSUMER)).with(csrf())
+							.contentType(MediaType.APPLICATION_JSON).content(PAYLOAD)).andReturn()));
+				}
+				// A linha ainda não é visível às consultas. As três inserções devem disputar a constraint real.
+				await().atMost(10, TimeUnit.SECONDS).untilAsserted(() -> assertThat(jdbcTemplate.queryForObject("""
+						SELECT count(*) FROM pg_stat_activity
+						WHERE datname = current_database() AND wait_event = 'transactionid'
+						AND query LIKE 'insert into activation_requests%'
+						""", Long.class)).isEqualTo(3));
+			});
+			for (var future : futures) {
+				var response = future.get(20, TimeUnit.SECONDS).getResponse();
+				assertThat(response.getStatus()).isEqualTo(200);
+				var body = objectMapper.readTree(response.getContentAsString());
+				assertThat(body.get("id").asText()).isEqualTo(id.toString());
+				assertThat(body.get("status").asText()).isEqualTo("PENDING");
+				assertThat(body.get("createdAt").asText()).isEqualTo(CREATED_AT.toString());
+				assertThat(body.size()).isEqualTo(7);
+			}
+		}
+		assertThat(storedRequestCount()).isEqualTo(1);
 		provider.verify(0, anyRequestedFor(anyUrl()));
 	}
 

@@ -286,8 +286,32 @@ curl -i -X POST http://localhost:8080/api/v1/requests \
   --data '{"externalId":"EXT-12345","customerId":"CUST-10001","productCode":"INTERNET-500"}'
 ```
 
-JWT, escopos e a política HTTP para repetições de `externalId` ainda estão
-pendentes; a constraint de unicidade global continua garantida pelo PostgreSQL.
+JWT e escopos ainda estão pendentes. A unicidade global de `externalId` continua
+garantida pela constraint do PostgreSQL.
+
+Ao repetir o `POST` com o mesmo `externalId`, `customerId`, `productCode` e
+consumidor autenticado, a API responde `200 OK` com a representação atual do
+registro existente. A comparação é exata, sem trim ou conversão de maiúsculas.
+O ID, as datas, a versão e os metadados de processamento são preservados;
+o status pode ser `PENDING`, `PROCESSING`, `COMPLETED` ou `FAILED`, sem reiniciar
+a ativação nem chamar o provedor. O `Location` acompanha apenas o `201` da nova
+criação. Essa decisão permite reenviar um pedido após perder a resposta sem
+criar outro trabalho, mantendo a distinção entre criação e repetição.
+
+Conteúdo divergente ou colisão com outro consumidor retorna `409 Conflict`
+com `ProblemDetail` e a mensagem genérica `Activation request conflict`, sem
+alterar a linha original nem revelar sua representação ou proprietário.
+
+A consulta prévia evita inserções desnecessárias, mas não garante unicidade
+entre chamadas simultâneas. A inserção usa uma transação própria: se perder a
+disputa pela constraint `uk_activation_requests_external_id`, termina com
+rollback antes de uma nova consulta transacional ao registro confirmado.
+Aplicam-se então as mesmas regras de `200` ou `409`. Outras violações de
+integridade não são convertidas em repetição. Chamadas idênticas concorrentes
+produzem uma única linha, um `201` e `200` para as demais chamadas.
+
+Essa é a idempotência da API ao registrar trabalho. A idempotência da ativação
+no provedor exige garantias próprias da integração, ainda pendente.
 
 ## Consulta de solicitação
 
@@ -582,6 +606,13 @@ real, sem transação de teste, para verificar commit, `PENDING`, proprietário
 autenticado, auditoria, `201`, `Location` e os sete campos públicos. Também verifica
 `400` sem inserção para campos inválidos/controlados pelo servidor, além de
 preservação da autenticação e da proteção CSRF.
+Os testes de repetição cobrem os quatro status, comparando todos os campos
+armazenados antes e depois e exigindo zero chamadas ao WireMock. Também cobrem
+divergência de cliente/produto (incluindo espaços), colisão entre consumidores
+e criações paralelas com barreira de início. Um cenário mantém a primeira
+inserção sem commit e observa três inserções bloqueadas no PostgreSQL antes
+de liberá-la, comprovando a recuperação após a disputa real da constraint,
+sem mocks de repositório.
 Os contratos HTTP também cobrem campos obrigatórios ausentes, corpo vazio ou
 JSON inválido, rejeição de propriedades desconhecidas e de todos os metadados
 controlados pelo servidor, inclusive timestamps válidos enviados pelo cliente.
