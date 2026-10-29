@@ -131,6 +131,26 @@ três operações, preservação do proprietário, tentativa de atribuição pel
 isolamento entre consumidores e exigência de escopo. Não iniciam Boot, banco,
 Docker ou rede.
 
+Para executar somente os testes unitários de isolamento BOLA:
+
+```bash
+bash ./mvnw -Dtest=ActivationRequestBolaUnitTests,ActivationRequestConsumerQueryUnitTests test
+```
+
+`ActivationRequestBolaUnitTests` usa controller, serviço e mapper reais com um
+principal JWT já autenticado e repositório substituído. Verifica acesso pelo
+proprietário, resposta `404` idêntica para recurso alheio ou inexistente,
+parâmetros de proprietário forjados, filtros opcionais, paginação e repasse dos
+totais restritos ao consumidor, inclusive quando não há registros acessíveis.
+As duas identidades têm o mesmo escopo de leitura.
+
+`ActivationRequestConsumerQueryUnitTests` executa a construção real da
+`Specification` e inspeciona a fronteira Criteria: o predicado de `consumerId`
+é obrigatório nas quatro combinações de filtros e se combina com `status` e
+`customerId` usando AND. Esses testes não iniciam Boot, banco, Docker ou rede.
+A execução de SQL e da contagem no PostgreSQL permanece coberta pelos testes de
+integração existentes em `ActivationRequestQueryTests`.
+
 Testes unitários criados para o contrato do Access Token local:
 
 ```bash
