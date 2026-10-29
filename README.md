@@ -93,6 +93,11 @@ A migração `V1__create_activation_requests.sql` cria a tabela `activation_requ
 | `created_at` | `TIMESTAMP WITH TIME ZONE`, obrigatório; padrão `CURRENT_TIMESTAMP`. |
 | `updated_at` | `TIMESTAMP WITH TIME ZONE`, obrigatório; padrão `CURRENT_TIMESTAMP`. |
 
+A V1 cria a constraint `uk_activation_requests_external_id UNIQUE (external_id)`.
+A chave contém apenas `external_id`: o mesmo valor colide mesmo quando consumidor,
+cliente, produto ou status diferem. Essa regra é aplicada pelo PostgreSQL a todas
+as escritas na tabela.
+
 Os nomes em `snake_case` correspondem aos campos `externalId`, `customerId`,
 `productCode`, `createdAt` e `updatedAt` do contrato da API. O limite adotado para
 os três identificadores textuais é de 100 caracteres. As datas representam
@@ -527,6 +532,19 @@ Para executar o build e os testes:
 bash ./mvnw -B --no-transfer-progress verify
 ```
 
+Em máquinas com pouca RAM, limite a memória do Maven e da JVM de testes e
+mantenha apenas um contexto Spring no cache. O comando abaixo executa a suíte
+completa; os contextos são recriados quando necessário:
+
+```bash
+MAVEN_OPTS='-Xmx256m -XX:MaxMetaspaceSize=192m' \
+  bash ./mvnw -B --no-transfer-progress clean verify \
+  -DforkCount=1 -Dspring.test.context.cache.maxSize=1 \
+  '-DargLine=-Xmx384m -XX:MaxMetaspaceSize=256m -XX:ActiveProcessorCount=2'
+```
+
+Esses limites são das JVMs; o PostgreSQL do Testcontainers também consome RAM.
+
 O teste `AtivaflowApiApplicationTests` verifica a inicialização do contexto com o
 perfil `test`, o acesso anônimo ao Swagger UI e seus recursos, os documentos
 OpenAPI, os metadados da API e a preservação das regras de acesso às demais rotas
@@ -536,9 +554,11 @@ imagem `postgres:17-alpine`, sem depender do banco ou das credenciais locais.
 servidor WireMock iniciado pelo próprio teste.
 `FlywayMigrationTests` verifica a aplicação e validação das migrações V1, V2 e V3,
 persistência dos campos públicos e internos, valores padrão, obrigatoriedade
-de proprietário não vazio, rejeição de contadores negativos, unicidade global
-de `external_id` entre consumidores e rejeição de status desconhecido no
-PostgreSQL real.
+de proprietário não vazio, rejeição de contadores negativos e rejeição de status
+desconhecido no PostgreSQL real. Para a unicidade global de `external_id`, consulta
+`pg_constraint` para conferir a constraint validada `UNIQUE (external_id)` e testa
+duplicatas com consumidor, cliente, produto e status iguais ou diferentes,
+exigindo o SQLSTATE `23505` (violação de unicidade).
 `ActivationRequestTests` verifica criação, validações, encapsulamento e transições
 de estado. `CreateActivationRequestTests` usa o validador Jakarta real para
 verificar obrigatoriedade (inclusive espaços Unicode), limites de 99/100/101

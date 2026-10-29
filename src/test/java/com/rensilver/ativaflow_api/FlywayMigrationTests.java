@@ -1,11 +1,13 @@
 package com.rensilver.ativaflow_api;
 
+import java.sql.SQLException;
 import java.time.OffsetDateTime;
 import java.util.UUID;
 
 import org.flywaydb.core.Flyway;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.CsvSource;
 import org.junit.jupiter.params.provider.NullAndEmptySource;
 import org.junit.jupiter.params.provider.ValueSource;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -164,18 +166,44 @@ class FlywayMigrationTests {
 	}
 
 	@Test
-	void rejectsDuplicateExternalIdAcrossConsumersCustomersAndProducts() {
+	void definesValidatedGlobalUniqueConstraintOnExternalId() {
+		String definition = jdbcTemplate.queryForObject("""
+				SELECT pg_get_constraintdef(oid)
+				FROM pg_constraint
+				WHERE conrelid = 'activation_requests'::regclass
+				  AND conname = 'uk_activation_requests_external_id'
+				  AND contype = 'u'
+				  AND convalidated
+				""", String.class);
+
+		assertThat(definition).isEqualTo("UNIQUE (external_id)");
+	}
+
+	@ParameterizedTest
+	@CsvSource({
+			"consumer-a, CUST-1, PRODUCT-1, PENDING",
+			"consumer-b, CUST-1, PRODUCT-1, PENDING",
+			"consumer-a, CUST-2, PRODUCT-1, PENDING",
+			"consumer-a, CUST-1, PRODUCT-2, PENDING",
+			"consumer-b, CUST-2, PRODUCT-2, COMPLETED"
+	})
+	void rejectsDuplicateExternalIdRegardlessOfConsumerCustomerProductOrStatus(
+			String consumerId, String customerId, String productCode, String status) {
 		jdbcTemplate.update("""
 				INSERT INTO activation_requests (id, external_id, customer_id, product_code, consumer_id)
 				VALUES (?, 'EXT-DUPLICATE', 'CUST-1', 'PRODUCT-1', 'consumer-a')
 				""", UUID.randomUUID());
 
 		assertThatThrownBy(() -> jdbcTemplate.update("""
-				INSERT INTO activation_requests (id, external_id, customer_id, product_code, consumer_id)
-				VALUES (?, 'EXT-DUPLICATE', 'CUST-2', 'PRODUCT-2', 'consumer-b')
-				""", UUID.randomUUID()))
+				INSERT INTO activation_requests
+				    (id, external_id, customer_id, product_code, consumer_id, status)
+				VALUES (?, 'EXT-DUPLICATE', ?, ?, ?, ?)
+				""", UUID.randomUUID(), customerId, productCode, consumerId, status))
 				.isInstanceOf(DataIntegrityViolationException.class)
-				.hasMessageContaining("uk_activation_requests_external_id");
+				.hasMessageContaining("uk_activation_requests_external_id")
+				.rootCause()
+				.isInstanceOfSatisfying(SQLException.class,
+						cause -> assertThat(cause.getSQLState()).isEqualTo("23505"));
 	}
 
 	@Test
