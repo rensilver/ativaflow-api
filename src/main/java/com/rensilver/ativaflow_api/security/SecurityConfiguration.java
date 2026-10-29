@@ -14,7 +14,7 @@ import org.springframework.security.web.SecurityFilterChain;
 public class SecurityConfiguration {
 
 	@Bean
-	SecurityFilterChain securityFilterChain(HttpSecurity http) throws Exception {
+	SecurityFilterChain securityFilterChain(HttpSecurity http, SecurityProblemHandler problemHandler) throws Exception {
 		return http
 				.authorizeHttpRequests(authorize -> authorize
 						.requestMatchers("/swagger-ui.html", "/swagger-ui/**",
@@ -24,8 +24,11 @@ public class SecurityConfiguration {
 						.permitAll()
 						.anyRequest().authenticated())
 				.cors(withDefaults())
+				.exceptionHandling(exceptions -> exceptions
+						.authenticationEntryPoint(problemHandler)
+						.accessDeniedHandler(problemHandler))
 				.formLogin(withDefaults())
-				.httpBasic(withDefaults())
+				.httpBasic(basic -> basic.authenticationEntryPoint(problemHandler))
 				.build();
 	}
 }

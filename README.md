@@ -633,6 +633,143 @@ O controller de criação aciona a validação com `@Valid` no parâmetro
 `@RequestBody`. As anotações não validam automaticamente uma chamada direta ao
 construtor do record.
 
+## Tratamento centralizado de erros
+
+`ApiExceptionHandler`, anotado com `@RestControllerAdvice`, estende
+[`ResponseEntityExceptionHandler`](https://docs.spring.io/spring-framework/docs/6.2.8/javadoc-api/org/springframework/web/servlet/mvc/method/annotation/ResponseEntityExceptionHandler.html)
+para centralizar exceções da aplicação e do Spring MVC. `ApiProblemDetails`
+centraliza a criação do corpo também usado pelos filtros de segurança.
+As respostas seguem [Problem Details (RFC 9457)](https://www.rfc-editor.org/rfc/rfc9457.html), com `Content-Type: application/problem+json`,
+`type`, `title`, `status`, `detail` e `instance`. O campo
+`correlationId` corresponde ao header `X-Correlation-ID` validado ou gerado pelo
+filtro existente; o mesmo identificador aparece no evento de log. `instance`
+contém apenas o caminho, sem os parâmetros da query string.
+Erros de validação de entrada com campo identificado usam o tipo estável
+`urn:ativaflow:problem:validation-error`, independente da rota, do campo ou da
+mensagem. Essa URI identifica o contrato de validação e não depende de um domínio
+ou de uma página publicada. Os demais erros usam `type: about:blank`, que
+identifica a semântica do status HTTP; `title` usa sua
+descrição padrão. Para status sem constante em `HttpStatus`, o código numérico
+é preservado e o título usa `Request failed`.
+
+| Situação | Status HTTP | Resposta |
+| --- | --- | --- |
+| JSON inválido, ausente ou com propriedades desconhecidas | 400 | `Invalid request body`. |
+| Bean Validation no corpo ou nos parâmetros | 400 | Mensagem segura e `errors: [{field, message}]`, sem valores rejeitados. |
+| Tipo de parâmetro inválido ou parâmetro obrigatório ausente | 400 | `Invalid request parameters` e `errors: [{field, message}]`. |
+| Paginação fora dos limites suportados pelo serviço | 400 | `Invalid request parameters`. |
+| Autenticação ausente ou credenciais HTTP Basic inválidas | 401 | `Authentication is required`, com `WWW-Authenticate: Basic realm="Realm"`. |
+| Acesso negado ou rejeição de CSRF | 403 | `Access is denied`. |
+| Solicitação inexistente ou de outro consumidor | 404 | `Activation request not found`. |
+| Colisão de `externalId` | 409 | `Activation request conflict`. |
+| Outros erros do MVC, como método ou mídia incompatíveis | Status do MVC | Mensagem segura, preservando cabeçalhos como `Allow`. |
+| Falha inesperada ou validação do valor retornado pelo controller | 500 | `An unexpected error occurred`. |
+
+O array `errors` preserva uma entrada por violação, inclusive quando um campo viola
+mais de uma restrição. As mensagens são textos públicos fixos selecionados pelo
+código da restrição: `NotBlank`/`NotBlankText` → `Must not be blank`,
+`NotNull` → `Required value is missing`, `Size` → `Invalid length`,
+`Min`/`Max` → `Value out of range` e `Pattern` → `Invalid format`.
+Códigos desconhecidos usam `Invalid value`. Mensagens originais das anotações,
+do validador ou de erros globais não são copiadas: elas podem conter valores
+interpolados, SQL, nomes internos ou segredos.
+`field` usa o nome público do campo ou parâmetro (incluindo
+aliases de `@RequestParam` e `@PathVariable`); erros globais do objeto usam
+`request`. Falhas de conversão de parâmetros usam a mensagem segura `Invalid value`,
+e parâmetros obrigatórios ausentes usam `Required parameter is missing`.
+JSON ilegível não recebe um campo inventado; validação de retorno do controller
+continua sendo uma falha interna 500, sem `errors`.
+
+Exemplo de erro de validação:
+
+```json
+{
+  "type": "urn:ativaflow:problem:validation-error",
+  "title": "Bad Request",
+  "status": 400,
+  "detail": "Request validation failed",
+  "instance": "/api/v1/requests",
+  "correlationId": "client-request-123",
+  "errors": [{"field": "customerId", "message": "Must not be blank"}]
+}
+```
+
+O corpo público não inclui stack traces, SQL, nomes de classes internas, chaves,
+tokens, detalhes do provedor ou mensagens internas de exceções. Cabeçalhos de
+exceções também não são repassados indiscriminadamente: o advice preserva `Allow`
+para método incompatível e `Accept`/`Accept-Patch` para mídia incompatível.
+`Retry-After` só é preservado quando contém um único valor de segundos não
+negativos ou uma data HTTP válida. Demais cabeçalhos da exceção, como
+`Authorization`, `Set-Cookie`, `Location` e headers privados do provedor, são descartados.
+O desafio `WWW-Authenticate` continua sob responsabilidade de `SecurityProblemHandler`.
+
+O fallback `/error` também recebe proteção explícita no `application.yaml`, válida
+para todos os profiles: `server.error.include-exception=false` e
+`include-stacktrace`, `include-message`, `include-binding-errors` e `include-path`
+definidos como `never`. Esses controles do [Spring Boot](https://docs.spring.io/spring-boot/3.5/appendix/application-properties/#appendix.application-properties.server.server.error.include-stacktrace)
+impedem que os defaults do DevTools ou parâmetros como `?trace=true&message=true`
+exponham detalhes no fallback. Configurações externas de maior precedência devem
+manter esses valores.
+
+Rejeições geram `api_request_rejected` em `WARN`, com `status` e `correlationId`,
+sem registrar payload ou valores rejeitados. Falhas 5xx geram
+`api_request_failed` em `ERROR`, com a exceção detalhada no log interno.
+Exceções de autenticação e autorização continuam sob responsabilidade da
+cadeia Spring Security. `SecurityProblemHandler` implementa `AuthenticationEntryPoint`
+e `AccessDeniedHandler`, produzindo o mesmo contrato nos erros 401/403 dos filtros,
+inclusive quando o cliente solicita HTML. Uma requisição sem autenticação a um
+recurso protegido recebe 401 em vez de redirecionamento para login; uma rejeição
+de CSRF continua retornando 403. A configuração mantém HTTP Basic e form login;
+JWT e escopos permanecem pendentes.
+
+`ApiExceptionHandlerUnitTests` exercita o contrato HTTP com MockMvc standalone,
+validação e serialização reais, sem Spring Boot, banco ou provedor externo:
+
+```bash
+bash ./mvnw -Dtest=ApiExceptionHandlerUnitTests test
+```
+
+`ValidationProblemContractUnitTests` cobre o tipo estável, erros por campo no
+body, query e path, aliases, parâmetros obrigatórios, múltiplas mensagens e a
+correlação entre corpo, header e log. Para executar somente os testes dessa tarefa:
+
+```bash
+bash ./mvnw -Dtest=ValidationProblemContractUnitTests test
+```
+
+`SafeErrorResponsesUnitTests` cobre 400 (payload inválido), 404 (não encontrado),
+409 (conflito) e 500 (falha inesperada) nos endpoints com MockMvc standalone.
+Os dez cenários verificam mensagens públicas seguras, campos permitidos do
+Problem Details e correlação, sem expor payload, query string, SQL, credenciais,
+dados de outro consumidor, causas ou stack traces. Incluem exceções com mensagem
+interna sensível e falha inesperada sem mensagem. Para executar somente essa suíte:
+
+```bash
+bash ./mvnw -Dtest=SafeErrorResponsesUnitTests test
+```
+
+`ErrorDisclosureProtectionUnitTests` cobre mensagens sensíveis de validação no
+body, query, path e erros globais; respostas e cabeçalhos privados de exceções;
+`Retry-After` válido/inválido; preservação de `Allow`, `Accept` e `Accept-Patch`;
+falhas de banco/provedor; respostas 401/403; e o fallback `/error` em JSON e HTML
+com defaults de desenvolvimento e parâmetros de depuração.
+Os testes usam componentes em memória, sem iniciar Spring Boot, banco ou provedor.
+Para executar somente os testes criados nesta tarefa:
+
+```bash
+bash ./mvnw -Dtest=ErrorDisclosureProtectionUnitTests test
+```
+
+Os testes adicionados para a padronização exercitam negociação de conteúdo,
+status padrão e não padronizados, e os filtros de autenticação, autorização e
+CSRF em memória. Para executar somente esses testes, sem Spring Boot ou banco:
+
+```bash
+bash ./mvnw \
+  '-Dtest=ApiExceptionHandlerUnitTests#returnsCompleteProblemForStandardAndNonStandardStatuses+returnsProblemJsonForAcceptedJsonMediaTypes,SecurityProblemHandlerUnitTests' \
+  test
+```
+
 ## Criação de solicitações
 
 `POST /api/v1/requests` recebe os três identificadores descritos acima. O serviço
@@ -654,6 +791,21 @@ mantém o status e as datas originais. O `201` confirma a criação persistida; 
 conclusão da ativação pertence ao worker.
 Dados inválidos, propriedades desconhecidas ou campos controlados pelo servidor
 no JSON resultam em `400 Bad Request`, sem inserção.
+
+Falhas do provedor não alteram o HTTP da criação: rejeições, indisponibilidade,
+timeout e falhas de comunicação são classificadas pelo cliente e tratadas pelo
+worker. Status, corpo e cabeçalhos do provedor, incluindo `Retry-After`, não
+compõem a resposta do POST. Repetir uma solicitação que terminou em `FAILED`
+retorna `200 OK` com seu estado atual. Falhas locais ao persistir a criação
+continuam retornando erro HTTP; `201` confirma somente a persistência local.
+
+`AsyncProviderFailureIsolationUnitTests` protege esse contrato em memória e
+impede dependências diretas da criação e do tratamento HTTP de erros em relação
+ao cliente do provedor ou ao worker. Para executar somente esses testes:
+
+```bash
+bash ./mvnw -Dtest=AsyncProviderFailureIsolationUnitTests test
+```
 
 A segurança atual exige autenticação e CSRF. Exemplo com credenciais válidas,
 cookie de sessão e token CSRF obtidos na mesma sessão (por exemplo, no formulário
@@ -692,7 +844,8 @@ O conflito usa `Content-Type: application/problem+json`, sem header `Location`:
   "title": "Conflict",
   "status": 409,
   "detail": "Activation request conflict",
-  "instance": "/api/v1/requests"
+  "instance": "/api/v1/requests",
+  "correlationId": "client-request-123"
 }
 ```
 
@@ -826,7 +979,8 @@ existência ou os dados de solicitações alheias:
   "title": "Not Found",
   "status": 404,
   "detail": "Activation request not found",
-  "instance": "/api/v1/requests/0b7f3c1e-5d2a-4c4e-9a51-2f8d7b1e6c90"
+  "instance": "/api/v1/requests/0b7f3c1e-5d2a-4c4e-9a51-2f8d7b1e6c90",
+  "correlationId": "client-request-123"
 }
 ```
 
@@ -1212,8 +1366,8 @@ bash ./mvnw -B --no-transfer-progress \
   '-Dtest=CreateActivationRequestEndpointTests#concurrentIdenticalRequestsCreateOneRecordAndReturnItToEveryCaller+requestsLosingUniqueConstraintRaceApplyRepetitionRulesAfterRollback' test
 ```
 
-O contrato de conflito exige os cinco campos de Problem Details, sem campos
-extras ou `Location`, nos quatro status, mesmo com os metadados internos de
+O contrato de conflito exige os cinco campos de Problem Details e `correlationId`,
+sem dados internos ou `Location`, nos quatro status, mesmo com os metadados internos de
 processamento preenchidos, preservando todos os campos persistidos. Após uma
 colisão entre consumidores, os testes exigem `404` na consulta individual e
 listagem sem o registro alheio ou seus totais; o consumidor recusado ainda pode
