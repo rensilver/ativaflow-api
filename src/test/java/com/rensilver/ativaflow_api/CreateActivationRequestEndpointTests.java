@@ -6,6 +6,7 @@ import java.time.OffsetDateTime;
 import java.time.ZoneOffset;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
 import java.util.UUID;
 import java.util.concurrent.CyclicBarrier;
 import java.util.concurrent.Executors;
@@ -50,6 +51,7 @@ import org.springframework.test.json.JsonCompareMode;
 import org.springframework.test.web.servlet.MockMvc;
 import org.springframework.test.web.servlet.MvcResult;
 import org.springframework.transaction.PlatformTransactionManager;
+import org.springframework.transaction.TransactionDefinition;
 import org.springframework.transaction.support.TransactionTemplate;
 import org.springframework.transaction.support.TransactionSynchronizationManager;
 import org.springframework.web.bind.annotation.ControllerAdvice;
@@ -400,9 +402,23 @@ class CreateActivationRequestEndpointTests {
 			assertThat(results).extracting(result -> result.getResponse().getStatus())
 					.containsExactlyInAnyOrder(201, 200, 200, 200);
 			var expected = objectMapper.readTree(results.getFirst().getResponse().getContentAsString());
+			UUID id = UUID.fromString(expected.get("id").asText());
 			for (var result : results) {
 				assertThat(objectMapper.readTree(result.getResponse().getContentAsString())).isEqualTo(expected);
+				if (result.getResponse().getStatus() == 201) {
+					header().string("Location", PATH + "/" + id).match(result);
+				}
+				else {
+					header().doesNotExist("Location").match(result);
+				}
 			}
+			// Releitura fora das threads: somente dados confirmados em suas transações são visíveis.
+			assertThat(jdbcTemplate.queryForObject(
+					"SELECT COUNT(*) FROM activation_requests WHERE external_id = ?", Long.class, " EXT-12345 "))
+					.isEqualTo(1);
+			mockMvc.perform(get(PATH + "/" + id).with(user(CONSUMER)))
+					.andExpect(status().isOk())
+					.andExpect(content().json(expected.toString(), JsonCompareMode.STRICT));
 		}
 		assertThat(storedRequestCount()).isEqualTo(1);
 		provider.verify(0, anyRequestedFor(anyUrl()));
@@ -422,9 +438,13 @@ class CreateActivationRequestEndpointTests {
 		}
 		String consumer = changedField.startsWith("consumerId") ? OTHER_CONSUMER : CONSUMER;
 		String requestBody = objectMapper.writeValueAsString(payload);
-		try (var executor = Executors.newFixedThreadPool(3)) {
+		int callers = 3;
+		var start = new CyclicBarrier(callers);
+		var winnerTransaction = new TransactionTemplate(transactionManager);
+		winnerTransaction.setPropagationBehavior(TransactionDefinition.PROPAGATION_REQUIRES_NEW);
+		try (var executor = Executors.newFixedThreadPool(callers)) {
 			List<Future<MvcResult>> futures = new ArrayList<>();
-			var storedBefore = new TransactionTemplate(transactionManager).execute(transaction -> {
+			var storedBefore = winnerTransaction.execute(transaction -> {
 				jdbcTemplate.update("""
 						INSERT INTO activation_requests
 						(id, external_id, customer_id, product_code, consumer_id, created_at, updated_at)
@@ -432,16 +452,28 @@ class CreateActivationRequestEndpointTests {
 						""", id, " EXT-12345 ", "CUST-10001", "INTERNET-500", CONSUMER,
 						OffsetDateTime.ofInstant(CREATED_AT, ZoneOffset.UTC),
 						OffsetDateTime.ofInstant(CREATED_AT, ZoneOffset.UTC));
-				for (int caller = 0; caller < 3; caller++) {
-					futures.add(executor.submit(() -> mockMvc.perform(post(PATH).with(user(consumer)).with(csrf())
-							.contentType(MediaType.APPLICATION_JSON).content(requestBody)).andReturn()));
+				var winnerBackendPid = jdbcTemplate.queryForObject("SELECT pg_backend_pid()", Integer.class);
+				for (int caller = 0; caller < callers; caller++) {
+					futures.add(executor.submit(() -> {
+						// A transação vencedora pertence à thread principal e não é compartilhada.
+						assertThat(TransactionSynchronizationManager.isActualTransactionActive()).isFalse();
+						start.await(10, TimeUnit.SECONDS);
+						return mockMvc.perform(post(PATH).with(user(consumer)).with(csrf())
+								.contentType(MediaType.APPLICATION_JSON).content(requestBody)).andReturn();
+					}));
 				}
-				// A linha ainda não é visível às consultas. As três inserções devem disputar a constraint real.
-				await().atMost(10, TimeUnit.SECONDS).untilAsserted(() -> assertThat(jdbcTemplate.queryForObject("""
-						SELECT count(*) FROM pg_stat_activity
-						WHERE datname = current_database() AND wait_event = 'transactionid'
+				// Só confirma a vencedora quando três conexões/transações distintas disputam seu lock.
+				await().atMost(10, TimeUnit.SECONDS).untilAsserted(() -> assertThat(jdbcTemplate.queryForMap("""
+						SELECT count(*) AS waiting_inserts, count(DISTINCT pid) AS connections,
+						       count(DISTINCT backend_xid::text) AS transactions
+						FROM pg_stat_activity
+						WHERE datname = current_database()
+						AND state = 'active' AND wait_event_type = 'Lock' AND wait_event = 'transactionid'
 						AND query LIKE 'insert into activation_requests%'
-						""", Long.class)).isEqualTo(3));
+						AND pid <> ?
+						AND ? = ANY(pg_blocking_pids(pid))
+						""", winnerBackendPid, winnerBackendPid)).isEqualTo(Map.of("waiting_inserts", (long) callers,
+							"connections", (long) callers, "transactions", (long) callers)));
 				return jdbcTemplate.queryForMap("SELECT * FROM activation_requests WHERE id = ?", id);
 			});
 			for (var future : futures) {
@@ -452,6 +484,7 @@ class CreateActivationRequestEndpointTests {
 				}
 				var response = result.getResponse();
 				assertThat(response.getStatus()).isEqualTo(200);
+				header().doesNotExist("Location").match(result);
 				var body = objectMapper.readTree(response.getContentAsString());
 				assertThat(body.get("id").asText()).isEqualTo(id.toString());
 				assertThat(body.get("status").asText()).isEqualTo("PENDING");
@@ -461,6 +494,9 @@ class CreateActivationRequestEndpointTests {
 			assertThat(jdbcTemplate.queryForMap("SELECT * FROM activation_requests WHERE id = ?", id))
 					.isEqualTo(storedBefore);
 		}
+		assertThat(jdbcTemplate.queryForObject(
+				"SELECT COUNT(*) FROM activation_requests WHERE external_id = ?", Long.class, " EXT-12345 "))
+				.isEqualTo(1);
 		assertThat(storedRequestCount()).isEqualTo(1);
 		provider.verify(0, anyRequestedFor(anyUrl()));
 	}

@@ -153,10 +153,18 @@ class ActivationRequestClaimTests {
 		assertThat(service.claimNext("worker-a")).isEmpty();
 	}
 
-	@Test
-	void concurrentWorkersAcquireTheSameRequestOnlyOnce() throws Exception {
-		UUID id = insert("PENDING", 0, null, false, null);
-		int workers = 8;
+	@ParameterizedTest
+	@CsvSource({
+			"PENDING,    0,    ,    , 2",
+			"PENDING,    0,    ,    , 8",
+			"PROCESSING, 0,    , -60, 2",
+			"PROCESSING, 0,    , -60, 8",
+			"PROCESSING, 2, -60, -60, 2",
+			"PROCESSING, 2, -60, -60, 8"
+	})
+	void concurrentWorkersAcquireTheSameRequestOnlyOnce(String status, int attempts, Integer nextDelay,
+			Integer leaseDelay, int workers) throws Exception {
+		UUID id = insert(status, attempts, nextDelay, false, leaseDelay);
 		var ready = new CountDownLatch(workers);
 		var start = new CountDownLatch(1);
 		try (var executor = Executors.newVirtualThreadPerTaskExecutor()) {
@@ -176,13 +184,43 @@ class ActivationRequestClaimTests {
 				result.get(10, TimeUnit.SECONDS).ifPresent(winners::add);
 			}
 			assertThat(winners).hasSize(1);
+			var winner = winners.getFirst();
+			assertThat(winner.id()).isEqualTo(id);
+			assertThat(winner.version()).isEqualTo(1);
 			var stored = repository.findById(id).orElseThrow();
-			assertThat(stored.getClaimedBy()).isEqualTo(winners.getFirst().claimedBy());
+			assertThat(stored.getStatus().name()).isEqualTo("PROCESSING");
+			assertThat(stored.getClaimedBy()).isEqualTo(winner.claimedBy());
+			assertThat(stored.getLeaseUntil()).isEqualTo(winner.leaseUntil());
 			assertThat(stored.getVersion()).isEqualTo(1);
-			assertThat(stored.getAttemptCount()).isZero();
+			assertThat(stored.getAttemptCount()).isEqualTo(attempts);
 		} finally {
 			start.countDown();
 		}
+	}
+
+	@Test
+	void secondWorkerCannotAcquireClaimWhileFirstWorkerHasNotCommitted() {
+		UUID id = insert("PENDING", 0, null, false, null);
+
+		new TransactionTemplate(transactionManager).executeWithoutResult(transaction -> {
+			var candidate = repository.findNextClaimCandidate().orElseThrow();
+			assertThat(candidate.getId()).isEqualTo(id);
+			assertThat(repository.tryClaim(id, candidate.getVersion(), "worker-a", 45000)).isEqualTo(1);
+
+			// Mantém o claim real sem commit enquanto outra conexão tenta assumir a mesma linha.
+			try (var executor = Executors.newVirtualThreadPerTaskExecutor()) {
+				assertThat(executor.submit(() -> service.claimNext("worker-b"))
+						.get(5, TimeUnit.SECONDS)).isEmpty();
+			} catch (Exception exception) {
+				throw new AssertionError("Second worker must skip the uncommitted claim", exception);
+			}
+		});
+
+		var committed = jdbc.queryForMap("SELECT * FROM activation_requests WHERE id = ?", id);
+		assertThat(committed).containsEntry("status", "PROCESSING")
+				.containsEntry("claimed_by", "worker-a").containsEntry("version", 1L);
+		assertThat(service.claimNext("worker-b")).isEmpty();
+		assertThat(jdbc.queryForMap("SELECT * FROM activation_requests WHERE id = ?", id)).isEqualTo(committed);
 	}
 
 	@Test

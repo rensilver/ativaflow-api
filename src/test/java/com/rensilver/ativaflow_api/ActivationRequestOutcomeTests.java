@@ -17,6 +17,8 @@ import com.rensilver.ativaflow_api.service.ActivationRequestLeaseRecoveryService
 import com.rensilver.ativaflow_api.service.ActivationRequestOutcomeService;
 import com.rensilver.ativaflow_api.service.model.PreparedActivationAttempt;
 import com.rensilver.ativaflow_api.service.policy.ActivationRetryPolicy;
+import jakarta.persistence.EntityManagerFactory;
+import jakarta.persistence.OptimisticLockException;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
@@ -34,6 +36,7 @@ import org.springframework.transaction.annotation.Transactional;
 import org.springframework.transaction.support.TransactionTemplate;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 @Import({TestcontainersConfiguration.class, JpaAuditingConfiguration.class, ActivationRequestClaimService.class,
 		ActivationRequestAttemptService.class, ActivationRequestLeaseRecoveryService.class,
@@ -64,6 +67,9 @@ class ActivationRequestOutcomeTests {
 
 	@Autowired
 	private PlatformTransactionManager transactionManager;
+
+	@Autowired
+	private EntityManagerFactory entityManagerFactory;
 
 	@BeforeEach
 	void cleanDatabase() {
@@ -136,8 +142,52 @@ class ActivationRequestOutcomeTests {
 		assertThat(stored.getClaimedBy()).isNull();
 		assertThat(stored.getLeaseUntil()).isNull();
 		assertThat(stored.getVersion()).isEqualTo(attempt.version() + 1);
+		var terminalRow = jdbc.queryForMap("SELECT * FROM activation_requests WHERE id = ?", attempt.id());
+
 		assertThat(outcomes.recordSuccess(attempt)).isFalse();
+		assertThat(outcomes.recordPermanentFailure(attempt, "LATE_REJECTION")).isFalse();
+		assertThat(outcomes.recordSafeTransientFailure(attempt, "LATE_TRANSIENT_FAILURE", null)).isFalse();
+		assertThat(attempts.recordAmbiguousOutcome(attempt, "LATE_TIMEOUT")).isFalse();
+		assertThat(recovery.recoverExpiredLeases(10)).isZero();
 		assertThat(claims.claimNext("replacement")).isEmpty();
+		assertThat(jdbc.queryForMap("SELECT * FROM activation_requests WHERE id = ?", attempt.id())).isEqualTo(terminalRow);
+	}
+
+	@ParameterizedTest
+	@CsvSource({"PENDING, true", "PENDING, false", "PROCESSING, true", "PROCESSING, false"})
+	void staleEntityCannotOverwriteCommittedTerminalState(String snapshotStatus, boolean success) {
+		UUID id = insertPending();
+		try (var staleContext = entityManagerFactory.createEntityManager()) {
+			staleContext.getTransaction().begin();
+			try {
+				var stale = staleContext.find(ActivationRequest.class, id);
+				var claim = claims.claimNext("worker-a").orElseThrow();
+				var attempt = attempts.prepareAttempt(claim).orElseThrow();
+				if (snapshotStatus.equals("PROCESSING")) {
+					staleContext.refresh(stale);
+				}
+				assertThat(success ? outcomes.recordSuccess(attempt)
+						: outcomes.recordPermanentFailure(attempt, "PROVIDER_REJECTED")).isTrue();
+				var terminalRow = jdbc.queryForMap("SELECT * FROM activation_requests WHERE id = ?", id);
+				assertThat(terminalRow).containsEntry("status", success ? "COMPLETED" : "FAILED");
+
+				if (snapshotStatus.equals("PENDING")) {
+					stale.startProcessing();
+				} else if (success) {
+					stale.fail("LATE_REJECTION");
+				} else {
+					stale.complete();
+				}
+
+				assertThatThrownBy(staleContext::flush).isInstanceOf(OptimisticLockException.class);
+				staleContext.getTransaction().rollback();
+				assertThat(jdbc.queryForMap("SELECT * FROM activation_requests WHERE id = ?", id)).isEqualTo(terminalRow);
+			} finally {
+				if (staleContext.getTransaction().isActive()) {
+					staleContext.getTransaction().rollback();
+				}
+			}
+		}
 	}
 
 	@ParameterizedTest

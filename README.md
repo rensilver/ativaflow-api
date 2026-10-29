@@ -852,9 +852,23 @@ Os testes de repetição cobrem os quatro status, comparando todos os campos
 armazenados antes e depois e exigindo zero chamadas ao WireMock. Também cobrem
 divergência de cliente/produto (incluindo espaços), colisão entre consumidores
 e criações paralelas com barreira de início. Um cenário mantém a primeira
-inserção sem commit e observa três inserções bloqueadas no PostgreSQL antes
-de liberá-la, comprovando a recuperação após a disputa real da constraint,
-sem mocks de repositório.
+inserção em uma transação `REQUIRES_NEW` sem commit e libera três chamadas
+concorrentes com `CyclicBarrier`. Antes de confirmar a vencedora, consulta
+`pg_stat_activity` e `pg_blocking_pids` para exigir três inserções bloqueadas
+por ela, com conexões (`pid`) e transações (`backend_xid`) distintas. Isso
+comprova a recuperação após rollback na disputa real da constraint, sem mocks
+de repositório. A contagem global por `external_id` deve permanecer em uma linha.
+No cenário com quatro criações idênticas, exige exatamente um `201` com
+`Location`, três `200` sem `Location` e corpos iguais; uma consulta posterior
+confirma que a representação está persistida e acessível após o commit.
+
+Para executar apenas esses cenários de concorrência (requer Docker):
+
+```bash
+bash ./mvnw -B --no-transfer-progress \
+  '-Dtest=CreateActivationRequestEndpointTests#concurrentIdenticalRequestsCreateOneRecordAndReturnItToEveryCaller+requestsLosingUniqueConstraintRaceApplyRepetitionRulesAfterRollback' test
+```
+
 O contrato de conflito exige os cinco campos de Problem Details, sem campos
 extras ou `Location`, nos quatro status, mesmo com os metadados internos de
 processamento preenchidos, preservando todos os campos persistidos. Após uma
