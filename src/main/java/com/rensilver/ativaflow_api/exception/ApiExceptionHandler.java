@@ -1,6 +1,5 @@
 package com.rensilver.ativaflow_api.exception;
 
-import java.net.URI;
 import java.util.List;
 import java.util.UUID;
 
@@ -66,9 +65,8 @@ public class ApiExceptionHandler extends ResponseEntityExceptionHandler {
 		if (correlationId == null) {
 			correlationId = UUID.randomUUID().toString();
 		}
-		ProblemDetail problem = ProblemDetail.forStatusAndDetail(status, safeDetail(exception, status));
-		problem.setInstance(URI.create(((ServletWebRequest) request).getRequest().getRequestURI()));
-		problem.setProperty("correlationId", correlationId);
+		ProblemDetail problem = ApiProblemDetails.create(status, safeDetail(exception, status),
+				((ServletWebRequest) request).getRequest().getRequestURI(), correlationId);
 		if (status.value() == HttpStatus.BAD_REQUEST.value()) {
 			List<ValidationError> errors = validationErrors(exception);
 			if (!errors.isEmpty()) {
@@ -104,7 +102,7 @@ public class ApiExceptionHandler extends ResponseEntityExceptionHandler {
 			case HandlerMethodValidationException ignored -> "Invalid request parameters";
 			case TypeMismatchException ignored -> "Invalid request parameters";
 			case InvalidPaginationException ignored -> "Invalid request parameters";
-			default -> HttpStatus.valueOf(status.value()).getReasonPhrase();
+			default -> ApiProblemDetails.title(status);
 		};
 	}
 

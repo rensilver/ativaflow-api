@@ -637,18 +637,24 @@ construtor do record.
 
 `ApiExceptionHandler`, anotado com `@RestControllerAdvice`, estende
 [`ResponseEntityExceptionHandler`](https://docs.spring.io/spring-framework/docs/6.2.8/javadoc-api/org/springframework/web/servlet/mvc/method/annotation/ResponseEntityExceptionHandler.html)
-para centralizar exceções da aplicação e do Spring MVC. As respostas seguem
-Problem Details (RFC 9457), com `Content-Type: application/problem+json`,
+para centralizar exceções da aplicação e do Spring MVC. `ApiProblemDetails`
+centraliza a criação do corpo também usado pelos filtros de segurança.
+As respostas seguem [Problem Details (RFC 9457)](https://www.rfc-editor.org/rfc/rfc9457.html), com `Content-Type: application/problem+json`,
 `type: about:blank`, `title`, `status`, `detail` e `instance`. O campo
 `correlationId` corresponde ao header `X-Correlation-ID` validado ou gerado pelo
 filtro existente; o mesmo identificador aparece no evento de log. `instance`
 contém apenas o caminho, sem os parâmetros da query string.
+`type: about:blank` identifica a semântica do status HTTP; `title` usa sua
+descrição padrão. Para status sem constante em `HttpStatus`, o código numérico
+é preservado e o título usa `Request failed`.
 
 | Situação | Status HTTP | Resposta |
 | --- | --- | --- |
 | JSON inválido, ausente ou com propriedades desconhecidas | 400 | `Invalid request body`. |
 | Bean Validation no corpo ou nos parâmetros | 400 | Mensagem segura e `errors: [{field, message}]`, sem valores rejeitados. |
 | Tipo de parâmetro inválido ou paginação fora dos limites | 400 | `Invalid request parameters`. |
+| Autenticação ausente ou credenciais HTTP Basic inválidas | 401 | `Authentication is required`, com `WWW-Authenticate: Basic realm="Realm"`. |
+| Acesso negado ou rejeição de CSRF | 403 | `Access is denied`. |
 | Solicitação inexistente ou de outro consumidor | 404 | `Activation request not found`. |
 | Colisão de `externalId` | 409 | `Activation request conflict`. |
 | Outros erros do MVC, como método ou mídia incompatíveis | Status do MVC | Mensagem segura, preservando cabeçalhos como `Allow`. |
@@ -673,14 +679,28 @@ Rejeições geram `api_request_rejected` em `WARN`, com `status` e `correlationI
 sem registrar payload ou valores rejeitados. Falhas 5xx geram
 `api_request_failed` em `ERROR`, com a exceção detalhada no log interno.
 Exceções de autenticação e autorização continuam sob responsabilidade da
-cadeia Spring Security; a padronização dos erros 401/403 dos filtros permanece
-pendente junto com JWT e escopos.
+cadeia Spring Security. `SecurityProblemHandler` implementa `AuthenticationEntryPoint`
+e `AccessDeniedHandler`, produzindo o mesmo contrato nos erros 401/403 dos filtros,
+inclusive quando o cliente solicita HTML. Uma requisição sem autenticação a um
+recurso protegido recebe 401 em vez de redirecionamento para login; uma rejeição
+de CSRF continua retornando 403. A configuração mantém HTTP Basic e form login;
+JWT e escopos permanecem pendentes.
 
 `ApiExceptionHandlerUnitTests` exercita o contrato HTTP com MockMvc standalone,
 validação e serialização reais, sem Spring Boot, banco ou provedor externo:
 
 ```bash
 bash ./mvnw -Dtest=ApiExceptionHandlerUnitTests test
+```
+
+Os testes adicionados para a padronização exercitam negociação de conteúdo,
+status padrão e não padronizados, e os filtros de autenticação, autorização e
+CSRF em memória. Para executar somente esses testes, sem Spring Boot ou banco:
+
+```bash
+bash ./mvnw \
+  '-Dtest=ApiExceptionHandlerUnitTests#returnsCompleteProblemForStandardAndNonStandardStatuses+returnsProblemJsonForAcceptedJsonMediaTypes,SecurityProblemHandlerUnitTests' \
+  test
 ```
 
 ## Criação de solicitações

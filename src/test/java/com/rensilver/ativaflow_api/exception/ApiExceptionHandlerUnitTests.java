@@ -18,6 +18,7 @@ import org.junit.jupiter.params.provider.Arguments;
 import org.junit.jupiter.params.provider.MethodSource;
 import org.junit.jupiter.params.provider.ValueSource;
 import org.springframework.dao.DataIntegrityViolationException;
+import org.springframework.http.HttpHeaders;
 import org.springframework.http.HttpStatusCode;
 import org.springframework.http.MediaType;
 import org.springframework.http.converter.json.MappingJackson2HttpMessageConverter;
@@ -193,6 +194,33 @@ class ApiExceptionHandlerUnitTests {
 		return Stream.of(Arguments.of(429, "Too Many Requests"), Arguments.of(499, "Request failed"));
 	}
 
+	@ParameterizedTest
+	@MethodSource("problemStatusContract")
+	void returnsCompleteProblemForStandardAndNonStandardStatuses(int expectedStatus, String title, String detail)
+			throws Exception {
+		problem(get("/framework-error").param("status", Integer.toString(expectedStatus))
+				.queryParam("token", "secret"), expectedStatus, title, "/framework-error")
+				.andExpect(jsonPath("$.detail").value(detail))
+				.andExpect(header().string("Retry-After", "30"))
+				.andExpect(content().string(not(containsString("secret"))));
+	}
+
+	static Stream<Arguments> problemStatusContract() {
+		return Stream.of(
+				Arguments.of(429, "Too Many Requests", "Too Many Requests"),
+				Arguments.of(499, "Request failed", "Request failed"),
+				Arguments.of(503, "Service Unavailable", "An unexpected error occurred"),
+				Arguments.of(599, "Request failed", "An unexpected error occurred"));
+	}
+
+	@ParameterizedTest
+	@ValueSource(strings = {"application/json", "application/problem+json", "*/*"})
+	void returnsProblemJsonForAcceptedJsonMediaTypes(String accept) throws Exception {
+		failListing(new ActivationRequestConflictException());
+		problem(get(PATH).accept(accept), 409, "Conflict", PATH)
+				.andExpect(jsonPath("$.detail").value("Activation request conflict"));
+	}
+
 	@Test
 	void treatsReturnValueValidationAsInternalErrorWithoutLeakingValidationDetails() throws Exception {
 		problem(get("/invalid-result"), 500, "Internal Server Error", "/invalid-result")
@@ -247,7 +275,14 @@ class ApiExceptionHandlerUnitTests {
 	static class InvalidResultController {
 		@GetMapping("/framework-error")
 		public void frameworkError(@RequestParam int status) {
-			var failure = new ResponseStatusException(HttpStatusCode.valueOf(status), "SQL token=secret");
+			var failure = new ResponseStatusException(HttpStatusCode.valueOf(status), "SQL token=secret") {
+				private final HttpHeaders headers = new HttpHeaders();
+
+				@Override
+				public HttpHeaders getHeaders() {
+					return headers;
+				}
+			};
 			failure.getHeaders().set("Retry-After", "30");
 			throw failure;
 		}
