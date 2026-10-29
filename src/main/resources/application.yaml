@@ -29,6 +29,8 @@ server:
   shutdown: graceful
 
 app:
+  worker:
+    lease-duration: ${WORKER_LEASE_DURATION:30s}
   activation-provider:
     # Reserva de configuração; a autenticação depende do contrato do provedor.
     api-key: ${ACTIVATION_PROVIDER_API_KEY:}

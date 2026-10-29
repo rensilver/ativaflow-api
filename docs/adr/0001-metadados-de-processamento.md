@@ -6,8 +6,9 @@ Data: 2026-10-29. Decisão: aceita para orientar a implementação do processame
 
 A tabela `activation_requests` já contém os metadados internos na migração V2,
 mapeados por `model.ActivationRequest`. Esta decisão define sua semântica e o
-protocolo que o futuro worker deverá cumprir. Não implementa scheduler, claim,
-retry ou reconciliação. A persistência existente não garante esse protocolo.
+protocolo que o worker deverá cumprir. O estado de implementação do claim e as
+etapas ainda pendentes estão descritos ao final desta decisão. A persistência
+existente ainda não garante o protocolo completo de envio.
 
 Os estados públicos continuam `PENDING`, `PROCESSING`, `COMPLETED` e `FAILED`.
 Espera por retry e resultado indeterminado permanecem em `PROCESSING`. Os campos
@@ -130,16 +131,27 @@ A V2 garante tipos, nulidade, limites de texto e contadores não negativos. A
 entidade mapeia os campos e usa `@Version`; mapper e DTOs omitem os metadados.
 Não é necessária nova migração para definir este contrato.
 
-As relações entre colunas descritas acima, o limite de 3 tentativas, o claim
-atômico e o bloqueio de reenvio são obrigações da futura implementação, ainda
-sem enforcement completo no banco ou nos métodos da entidade. Os métodos atuais
+O claim atômico está implementado em `ActivationRequestClaimService`, com seleção
+`FOR UPDATE SKIP LOCKED`, atualização condicional e conferência das linhas
+afetadas na mesma transação `REQUIRES_NEW`. Ele aplica a elegibilidade acima,
+atribui posse usando o relógio do banco, incrementa versão/auditoria e preserva
+contador, agendamento e último erro. Retorna uma fotografia imutável da posse
+após o commit. `ActivationRequestClaimTests` cobre a disputa entre workers,
+linhas bloqueadas, recuperação segura, igualdade no vencimento e isolamento
+da transação; `ActivationRequestClaimServiceTests` cobre o tratamento da contagem
+de linhas e a validação dos parâmetros.
+
+Preparação do envio, renovação, persistência de resultados, scheduler e
+reconciliação continuam pendentes. As demais relações entre colunas e o limite
+total de 3 tentativas na preparação do envio ainda não possuem enforcement completo no banco ou
+nos métodos da entidade. Os métodos atuais
 `startProcessing()`, `complete()` e `fail()` cuidam das transições básicas;
 não implementam o protocolo de posse e envio desta decisão.
 
 Os testes existentes `FlywayMigrationTests`, `ActivationRequestPersistenceTests`,
 `ActivationRequestTests` e `ActivationRequestMapperTests` verificam schema,
 mapeamento, defaults, auditoria, lock otimista e isolamento dos campos públicos.
-Não comprovam o futuro fluxo do worker. Sua implementação deverá testar disputa
-de claim, vencimento inclusive no instante limite, rejeição de worker antigo,
+Esses testes não comprovam o fluxo completo do worker. As próximas etapas
+deverão testar rejeição de worker antigo na preparação e no resultado,
 recuperação antes/depois da preparação, limite total, agendamento e ausência de
 reenvio automático em resultado indeterminado, com PostgreSQL real.

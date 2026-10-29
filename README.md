@@ -126,7 +126,8 @@ proteção por versão e recuperação de resultado indeterminado. O futuro work
 deverá ativar `reconciliation_required` preventivamente antes do HTTP e limpar
 a sinalização apenas ao persistir um resultado conhecido. Assim, uma queda entre
 envio e gravação do resultado não libera um reenvio automático. A ADR define
-o protocolo; sua execução pelo worker ainda está pendente.
+o protocolo; a aquisição atômica está implementada conforme a seção de claim
+abaixo. Preparação do envio, HTTP e persistência do resultado ainda estão pendentes.
 
 `consumer_id` é diferente de `customer_id`: o primeiro identifica o sistema
 consumidor autenticado; o segundo identifica o cliente informado no pedido.
@@ -138,14 +139,15 @@ aceito do payload. Os DTOs públicos aceitam apenas `externalId`,
 Nenhuma das oito colunas internas deverá ser exposta na API.
 
 O schema, a entidade JPA e os DTOs estão implementados e cobertos por testes.
-Worker, retries, claim/lease e reconciliação ainda estão pendentes.
+Scheduler, envio, agendamento de retries e reconciliação ainda estão pendentes.
+O claim já atribui leases e recupera somente trabalho comprovadamente seguro.
 Os campos opcionais começam nulos; a sinalização de reconciliação
 permitirá manter um resultado ambíguo em
 `PROCESSING`, sem adicionar estados públicos. O limite de tentativas será
 aplicado pelo processamento; a constraint do banco impede somente contagens
 negativas. A unicidade de `external_id` continua global, inclusive entre
-consumidores. Os índices de listagem estão na V3; índices para claim serão
-definidos com a implementação dessa operação.
+consumidores. Os índices de listagem estão na V3; índices específicos para claim
+ainda não foram adicionados e dependerão da avaliação do plano e do volume de trabalho.
 
 `model.ActivationRequest` mapeia todas as colunas de V1/V2, com acesso JPA pelos
 campos e construtor sem argumentos `protected`, compatível com o Hibernate.
@@ -163,8 +165,9 @@ ocorrem por `startProcessing()` (`PENDING → PROCESSING`), `complete()`
 Transições inválidas lançam `InvalidActivationStatusTransitionException`;
 estados terminais não podem ser reabertos. `fail` exige texto não vazio de até
 100 caracteres para `last_error_code`; o chamador deve fornecer apenas um código
-categorizado, sem resposta bruta do provedor. As operações de retry, claim e reconciliação serão adicionadas
-com suas próprias regras; esta entidade ainda não implementa o processamento.
+categorizado, sem resposta bruta do provedor. Retry e reconciliação serão adicionados
+com suas próprias regras; o claim usa SQL condicional no repositório, conforme
+descrito abaixo. Esta entidade ainda não implementa o protocolo de envio.
 
 `createdAt` e `updatedAt` usam `Instant`, com `@CreatedDate`, `@LastModifiedDate`
 e `AuditingEntityListener`. `JpaAuditingConfiguration` habilita a auditoria com
@@ -178,8 +181,8 @@ O campo `version` é `Long` com `@Version`: permanece nulo antes da primeira
 persistência (permitindo ao Spring Data reconhecer uma entidade nova mesmo com
 UUID atribuído), recebe `0` na inserção e é incrementado pelo Hibernate nas
 atualizações. Gravações com versão desatualizada são rejeitadas por lock otimista.
-Atualizações SQL diretas, como o futuro claim do worker, precisarão controlar
-explicitamente a versão e a auditoria, pois não passam pelos callbacks JPA.
+Atualizações SQL diretas, como o claim do worker, controlam explicitamente a
+versão e a auditoria, pois não passam pelos callbacks JPA.
 
 A V2 pressupõe a tabela `activation_requests` vazia, conforme o cenário atual
 de desenvolvimento. Não há proprietário padrão nem backfill inferido de
@@ -190,6 +193,48 @@ proprietários antes de aplicar essa migração a um banco com dados.
 Os diretórios `infra/wiremock/mappings/` e `infra/wiremock/__files/` também estão
 preparados, sem conteúdo além dos arquivos `.gitkeep`. As decisões técnicas
 estão em `docs/adr/`.
+
+## Aquisição atômica pelo worker
+
+`service.ActivationRequestClaimService.claimNext(workerId)` adquire no máximo
+uma solicitação e retorna `Optional<ClaimedActivationRequest>`, com `id`, versão
+resultante, `claimedBy` e `leaseUntil`. O identificador do worker deve conter texto
+não vazio de até 100 unidades UTF-16. A duração é configurada por
+`app.worker.lease-duration` / `WORKER_LEASE_DURATION`, com padrão `30s` e mínimo
+de um milissegundo; a duração efetiva usa milissegundos inteiros.
+
+A chamada ao bean Spring abre uma transação própria (`REQUIRES_NEW`), seleciona
+uma candidata por `created_at ASC, id ASC` com `FOR UPDATE SKIP LOCKED` e executa
+um `UPDATE` condicionado por ID, versão e elegibilidade. Linhas bloqueadas por
+outras transações são ignoradas. A operação exige exatamente uma linha afetada:
+zero produz resultado vazio; contagem inesperada lança exceção e reverte a
+transação. Sem candidata, também retorna vazio.
+
+A seleção e a atualização exigem ausência de lease válido, menos de três
+tentativas e `reconciliation_required=false`, além de uma destas condições:
+
+- `PENDING`, contador zero e sem agendamento;
+- `PROCESSING` com retry agendado já vencido;
+- `PROCESSING`, contador zero e sem agendamento, representando claim inicial
+  abandonado antes da preparação do envio.
+
+O PostgreSQL fornece `CURRENT_TIMESTAMP` para comparar agendamento e lease e
+atribuir `lease_until` e `updated_at`. Lease vencido inclui igualdade ao instante
+atual. A aquisição muda o status para `PROCESSING`, preenche os dois campos de
+posse e incrementa `version`. Preserva contador, agendamento de retry, último
+erro, sinalização de reconciliação e dados de criação. O contexto JPA é limpo
+após o SQL direto, e a releitura retorna os metadados efetivamente persistidos.
+O proxy Spring confirma o commit antes de entregar o resultado ao chamador,
+inclusive quando uma transação externa depois sofre rollback.
+
+Esta etapa não adiciona scheduler nem chama o provedor. O claim sozinho não
+autoriza HTTP: a preparação do envio e as futuras escritas devem aplicar as
+verificações de posse, versão e lease da ADR-0001. Resultados indeterminados,
+tentativas esgotadas, retries futuros e estados terminais não são adquiridos.
+Não há nova migração nesta etapa.
+
+Referências: [locks e SKIP LOCKED no PostgreSQL](https://www.postgresql.org/docs/17/sql-select.html#SQL-FOR-UPDATE-SHARE)
+e [atualizações diretas no Spring Data JPA](https://docs.spring.io/spring-data/jpa/reference/jpa/query-methods.html#jpa.modifying-queries).
 
 ## Contratos de entrada e saída
 
@@ -719,6 +764,15 @@ criação e atualização.
 `ActivationRequestQueryTests` captura o SQL real das quatro combinações de
 filtros e verifica o escopo de consumidor no conteúdo e na contagem, predicados
 apenas para filtros presentes e paginação/ordenação no banco.
+
+`ActivationRequestClaimTests` usa PostgreSQL real para verificar disputa entre
+oito workers pela mesma linha, avanço sobre outra linha quando a primeira está
+bloqueada, commit independente do chamador, elegibilidade, recuperação segura,
+preservação dos metadados, versão/auditoria e igualdade no vencimento de lease e
+retry. Também exige zero linhas afetadas para versão obsoleta ou trabalho
+inelegível. `ActivationRequestClaimServiceTests` verifica que zero linhas não
+concede posse, que contagens inesperadas falham e que identificadores inválidos
+e leases sem duração positiva suficiente são rejeitados.
 
 Também é possível executar a aplicação com o PostgreSQL do Testcontainers e o
 perfil `test` por meio de `TestAtivaflowApiApplication`:
