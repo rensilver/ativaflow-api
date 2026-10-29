@@ -313,7 +313,69 @@ existência ou os dados de solicitações alheias:
 
 Um ID que não seja UUID resulta em `400 Bad Request`. A consulta exige
 autenticação; com `Accept: application/json`, chamadas anônimas recebem `401`.
-A listagem de solicitações ainda está pendente.
+
+## Listagem de solicitações
+
+`GET /api/v1/requests` retorna `200 OK` com paginação iniciada em zero. Os filtros
+são opcionais e combinados com **AND**. A busca e a contagem no PostgreSQL sempre
+incluem o proprietário obtido de `Principal.getName()`, sem expor registros ou
+totais de outros consumidores.
+
+| Parâmetro | Contrato |
+| --- | --- |
+| `status` | `PENDING`, `PROCESSING`, `COMPLETED` ou `FAILED`, em maiúsculas. Ausente ou vazio não filtra por status. |
+| `customerId` | Igualdade exata, sensível a maiúsculas, sem remover espaços nem interpretar curingas. Se informado, deve conter texto não branco de até 100 unidades UTF-16, como na criação. |
+| `page` | Inteiro a partir de `0`; padrão `0`. |
+| `size` | Inteiro entre `1` e `100`; padrão `20`. |
+
+`page` e `size` vazios usam os respectivos padrões. Valores inválidos retornam
+`400 Bad Request` com `Content-Type: application/problem+json`. O deslocamento
+`page * size` deve ser no máximo `2147483647`, limite da paginação JPA.
+
+A ordenação é fixa em `createdAt DESC, id DESC`, incluindo o desempate por UUID
+no PostgreSQL. O parâmetro `sort` não altera essa ordem. A paginação ocorre no
+banco; apenas o conteúdo da página é convertido pelo mapper nos mesmos sete
+campos públicos usados pela consulta individual. A ordem é determinística para
+um conjunto de dados inalterado; inserções ou alterações entre chamadas podem
+deslocar resultados entre páginas.
+
+```bash
+curl -i --get http://localhost:8080/api/v1/requests \
+  --user "$API_USER:$API_PASSWORD" \
+  --header 'Accept: application/json' \
+  --data-urlencode 'status=PENDING' \
+  --data-urlencode 'customerId=CUST-10001' \
+  --data-urlencode 'page=0' \
+  --data-urlencode 'size=20'
+```
+
+O formato da resposta é um DTO estável, independente da serialização interna de
+`Page` do Spring Data:
+
+```json
+{
+  "content": [
+    {
+      "id": "0b7f3c1e-5d2a-4c4e-9a51-2f8d7b1e6c90",
+      "externalId": "EXT-12345",
+      "customerId": "CUST-10001",
+      "productCode": "INTERNET-500",
+      "status": "PENDING",
+      "createdAt": "2026-10-28T15:00:00Z",
+      "updatedAt": "2026-10-28T15:00:00Z"
+    }
+  ],
+  "page": 0,
+  "size": 20,
+  "totalElements": 1,
+  "totalPages": 1
+}
+```
+
+Sem correspondências, `content` é `[]`, `totalElements` e `totalPages` são `0`.
+Uma página além da última também retorna `200` e `content: []`, preservando os
+totais dos filtros e o número da página solicitada. A rota exige autenticação;
+com `Accept: application/json`, chamadas anônimas recebem `401`.
 
 ## Perfis e variáveis de ambiente
 
@@ -442,6 +504,12 @@ do teste simula o worker via SQL após o commit e antes da serialização,
 avançando a linha até `COMPLETED` e alterando `updatedAt`. O JSON continua em
 `PENDING`, com as datas originais. Essa simulação não implementa o worker nem
 usa esperas para coordenar a execução.
+
+`ListActivationRequestsEndpointTests` verifica paginação 0-based, padrões e limites,
+filtros isolados e combinados com AND, igualdade exata de `customerId`, os quatro
+status, parâmetros inválidos, páginas vazias e isolamento de conteúdo e totais
+entre consumidores. Também verifica os sete campos públicos e a ordenação
+`createdAt DESC, id DESC`, inclusive empates de data em páginas distintas.
 
 Também é possível executar a aplicação com o PostgreSQL do Testcontainers e o
 perfil `test` por meio de `TestAtivaflowApiApplication`:
