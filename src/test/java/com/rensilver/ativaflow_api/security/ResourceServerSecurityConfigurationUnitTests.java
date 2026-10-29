@@ -65,8 +65,10 @@ class ResourceServerSecurityConfigurationUnitTests {
 		context.getBeanFactory().registerSingleton("pathMappedEndpoints", new PathMappedEndpoints("/actuator", List.of()));
 		var processor = new ObjectPostProcessor<Object>() {
 			@Override
+			@SuppressWarnings("unchecked")
 			public <O> O postProcess(O object) {
-				return object;
+				// Executa os callbacks de inicialização dos filtros, como no contexto gerenciado pelo Spring.
+				return (O) context.getAutowireCapableBeanFactory().initializeBean(object, object.getClass().getName());
 			}
 		};
 		var shared = new HashMap<Class<?>, Object>();
