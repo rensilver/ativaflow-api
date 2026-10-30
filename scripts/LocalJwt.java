@@ -70,7 +70,13 @@ public class LocalJwt {
         var signer = Signature.getInstance("SHA256withRSA");
         signer.initSign(privateKey);
         signer.update(payload.getBytes(StandardCharsets.US_ASCII));
-        write(directory.resolve(headerFile), "Authorization: Bearer " + payload + "." + encode(signer.sign()) + "\n");
+        byte[] signature = signer.sign();
+        signer.initVerify(publicKey);
+        signer.update(payload.getBytes(StandardCharsets.US_ASCII));
+        if (!signer.verify(signature)) {
+            throw new IllegalArgumentException("Local JWT private and public keys do not match");
+        }
+        write(directory.resolve(headerFile), "Authorization: Bearer " + payload + "." + encode(signature) + "\n");
     }
 
     private static Path outsideGit(Path path) throws Exception {
