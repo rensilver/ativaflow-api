@@ -1,0 +1,21 @@
+spring:
+  main:
+    banner-mode: "off"
+  datasource:
+    url: ${DB_URL}
+    username: ${DB_USERNAME}
+    password: ${DB_PASSWORD}
+  devtools:
+    restart:
+      enabled: false
+    livereload:
+      enabled: false
+
+app:
+  activation-provider:
+    base-url: ${ACTIVATION_PROVIDER_BASE_URL}
+
+logging:
+  structured:
+    format:
+      console: logstash

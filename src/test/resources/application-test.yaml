@@ -1,0 +1,18 @@
+# PostgreSQL e credenciais são fornecidos por @ServiceConnection.
+spring:
+  security:
+    oauth2:
+      resourceserver:
+        jwt:
+          # Decoder lazy: os testes existentes usam identidades simuladas, sem consultar este emissor.
+          issuer-uri: https://issuer.example.test
+
+app:
+  http:
+    rate-limit:
+      enabled: false
+  worker:
+    enabled: false
+  activation-provider:
+    # Porta reservada para testes; testes HTTP devem sobrescrever com o WireMock.
+    base-url: http://localhost:1

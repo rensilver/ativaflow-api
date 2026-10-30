@@ -1,0 +1,21 @@
+# Somente os inputs necessarios ao build entram no contexto.
+**
+!pom.xml
+!mvnw
+!.mvn/
+!.mvn/wrapper/
+!.mvn/wrapper/maven-wrapper.properties
+!src/
+!src/main/
+!src/main/**
+
+# Mesmo dentro de src/main, nao enviar configuracao local ou material de chaves.
+**/.env
+**/.env.*
+**/*.pem
+**/*.key
+**/*.p12
+**/*.pfx
+**/*.jks
+**/target/
+**/*.log

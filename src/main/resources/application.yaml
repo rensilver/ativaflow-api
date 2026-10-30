@@ -1,3 +1,75 @@
 spring:
   application:
     name: ativaflow-api
+  jackson:
+    deserialization:
+      fail-on-unknown-properties: true
+  datasource:
+    hikari:
+      # HikariCP recebe este timeout em milissegundos.
+      connection-timeout: ${DB_CONNECTION_TIMEOUT_MS:30000}
+  flyway:
+    enabled: true
+    locations: classpath:db/migration
+    validate-on-migrate: true
+    baseline-on-migrate: false
+  jpa:
+    open-in-view: false
+    hibernate:
+      ddl-auto: validate
+  lifecycle:
+    timeout-per-shutdown-phase: ${SHUTDOWN_TIMEOUT:30s}
+
+server:
+  # O fallback de rate limit usa o IP da conexão, sem confiar em headers do cliente.
+  forward-headers-strategy: none
+  port: ${SERVER_PORT:8080}
+  shutdown: graceful
+  error:
+    include-exception: false
+    include-stacktrace: never
+    include-message: never
+    include-binding-errors: never
+    include-path: never
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,prometheus
+  endpoint:
+    health:
+      show-details: never
+      show-components: never
+      probes:
+        enabled: true
+      group:
+        liveness:
+          include: livenessState
+        readiness:
+          # Criar e consultar solicitações exige banco, mas não o provedor assíncrono.
+          include: readinessState,db
+
+app:
+  http:
+    max-body-bytes: ${API_MAX_BODY_BYTES:16384}
+    rate-limit:
+      enabled: ${API_RATE_LIMIT_ENABLED:true}
+      requests: ${API_RATE_LIMIT_REQUESTS:120}
+      window: ${API_RATE_LIMIT_WINDOW:1m}
+      max-keys: ${API_RATE_LIMIT_MAX_KEYS:10000}
+  worker:
+    enabled: ${WORKER_ENABLED:true}
+    poll-interval: ${WORKER_POLL_INTERVAL:250ms}
+    lease-duration: ${WORKER_LEASE_DURATION:30s}
+    retry:
+      max-attempts: ${WORKER_RETRY_MAX_ATTEMPTS:3}
+      initial-delay: ${WORKER_RETRY_INITIAL_DELAY:1s}
+      max-delay: ${WORKER_RETRY_MAX_DELAY:1m}
+      jitter-ratio: ${WORKER_RETRY_JITTER_RATIO:0.25}
+  activation-provider:
+    connect-timeout: ${ACTIVATION_PROVIDER_CONNECT_TIMEOUT:2s}
+    read-timeout: ${ACTIVATION_PROVIDER_READ_TIMEOUT:5s}
+    retry-contract: ${ACTIVATION_PROVIDER_RETRY_CONTRACT:none}
+    # Reserva de configuração; a autenticação depende do contrato do provedor.
+    api-key: ${ACTIVATION_PROVIDER_API_KEY:}
