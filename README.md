@@ -49,6 +49,8 @@ pode indicar espera por reconciliação e não representa falha do script.
 O Compose inicia API, PostgreSQL e WireMock. Consulte os endpoints em
 [Swagger UI](http://localhost:8080/swagger-ui.html). Configuração, comandos manuais
 e detalhes das credenciais estão na [referência de desenvolvimento local](docs/local-development.md).
+Para executar os endpoints protegidos pela interface, siga o
+[guia de autenticação JWT no Swagger](docs/swagger-jwt.md).
 
 ### Executar os testes
 
@@ -190,27 +192,12 @@ No cenário proposto, a latência da API passa de **300 ms para 2,5 s**, algumas
 consultas de **50 ms para 1,2 s** e o provedor de **400 ms para 3 s**, com CPU em
 **45%** e memória em **60%**. São dados do enunciado, não medições deste projeto.
 
-1. **O que investigar primeiro?** Identificar início, rotas e instâncias afetadas;
-   comparar mudanças recentes, tráfego, p95/p99, erros, backlog e espera por
-   conexões. CPU e memória médias não descartam contenção de I/O, locks ou pool.
-2. **Como separar aplicação, banco e provedor?** Medir HTTP de entrada, aquisição
-   de conexão, SQL/commit e HTTP externo separadamente. O provedor roda no worker;
-   seus 3 s afetam a conclusão, sem integrar diretamente a latência do POST.
-3. **Quais logs e métricas ajudam?** Correlacionar `requestId`/`correlationId` nos
-   eventos de tentativa; observar latência HTTP, Hikari, JVM/GC, duração e resultado
-   do provedor, estados persistidos e locks/planos no PostgreSQL. Idade do backlog,
-   tempos por etapa e tracing ainda precisam ser acrescentados.
-4. **Quais melhorias considerar?** Corrigir queries/índices conforme planos,
-   reduzir contenção e dimensionar pool/concorrência pelo orçamento do banco e do
-   provedor. Calibrar timeouts/lease sem liberar retry de resultado ambíguo.
-5. **Qual hipótese relaciona os sintomas?** Provedor lento pode reduzir a vazão,
-   aumentar backlog e pressão no banco compartilhado com a API. Validar a sequência
-   temporal com atraso no WireMock e carga equivalente; os números isolados não
-   comprovam essa causa.
-6. **Como validar e reverter?** Repetir carga e massa de dados, comparar percentis,
-   erros, pool, SQL e vazão/idade do backlog. Definir limites aceitáveis antes do
-   rollout, preservar versão/configuração anterior e compatibilidade de schema
-   para rollback. Não considerar sucesso apenas responder rápido e acumular fila.
+1. **O que investigar primeiro?** Primeiro, verificaria quando a lentidão começou, quais operações foram afetadas e se houve alguma mudança recente na aplicação ou no volume de requisições. Em seguida, analisaria os tempos de resposta e possíveis pontos de espera, já que o uso de CPU e memória não indica, por si só, uma sobrecarga.
+2. **Como separar aplicação, banco e provedor?** Analisaria separadamente o tempo gasto em cada etapa, desde o recebimento da requisição até as consultas ao banco e a comunicação com o provedor. Como a integração externa ocorre de forma assíncrona, sua lentidão não deveria afetar diretamente o tempo de resposta da criação da solicitação.
+3. **Quais logs e métricas ajudam?** Utilizaria os logs com identificadores de correlação para acompanhar o processamento das solicitações. Também observaria os tempos de resposta da API, das consultas ao banco e do provedor, além da quantidade de erros, conexões disponíveis e solicitações aguardando processamento.
+4. **Quais melhorias considerar?** As melhorias dependeriam da causa identificada. Poderia otimizar consultas e índices do banco, ajustar a quantidade de processamentos simultâneos ou revisar os limites de tempo da integração externa, sempre evitando alterações que comprometam a consistência das solicitações.
+5. **Qual hipótese relaciona os sintomas?** Sim. Uma possibilidade seria a lentidão do provedor provocar acúmulo de solicitações, aumentando a carga sobre recursos compartilhados com a API e o banco. Para confirmar essa hipótese, compararia os horários em que os problemas começaram e realizaria testes simulando a lentidão do provedor.
+6. **Como validar e reverter?** Compararia as métricas anteriores com os resultados após a correção, observando tempos de resposta, erros e quantidade de solicitações pendentes. Também acompanharia o comportamento da aplicação sob carga para garantir que a melhoria fosse consistente, mantendo a possibilidade de reverter a alteração caso surgissem novos problemas.
 
 ## Produção
 
@@ -286,8 +273,14 @@ e tracing para acompanhar o fluxo entre serviços.
 - Evoluir a CI para publicar imagens em registry e fazer deploy gradual;
   hoje ela executa `verify` e build Docker, sem publicar nem implantar.
 
-## Uso de IA
+## Uso de Inteligência Artificial
 
-Nesta revisão, o Codex foi usado para reorganizar e resumir o README, conferir
-as regras de integração no código e redigir a tabela de comportamentos e a
-proposta de operação cloud.
+O desenvolvimento do AtivaFlow contou com o apoio do OpenAI Codex ao longo de todo o ciclo de desenvolvimento de software.
+
+Inicialmente, utilizei a IA para extrair e organizar os requisitos do desafio a partir do arquivo HTML fornecido. Com base nessa análise, elaborei especificações técnicas próprias, defini um planejamento de implementação por etapas e adotei uma abordagem de desenvolvimento orientada por especificações (Spec-Driven Development).
+
+Durante a implementação, utilizei o Codex como assistente de programação, apoiado por Skills especializadas em Java, Spring Boot, Spring Security, TDD, boas práticas de desenvolvimento, depuração sistemática (Systematic Debugging) e verificação antes da conclusão (Verification Before Completion). A ferramenta também auxiliou na criação de testes automatizados, refatorações e documentação.
+
+O processo foi colaborativo, incluindo sessões de brainstorming e discussões sobre alternativas de implementação, nas quais avaliei diferentes abordagens antes de definir as soluções. Também realizei revisões do código gerado, verificando regras de negócio, organização, legibilidade, segurança e resultados dos testes.
+
+Dessa forma, a IA foi utilizada para aumentar a produtividade e apoiar decisões técnicas, mantendo minha participação ativa no planejamento, na revisão das implementações e na validação da qualidade da solução.
