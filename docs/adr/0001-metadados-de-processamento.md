@@ -45,8 +45,7 @@ Uma falha depois da preparação pode reter trabalho mesmo sem envio efetivo;
 sem reconciliação automática, essa retenção exige intervenção operacional.
 Não há garantia de efeito externo exatamente uma vez.
 
-Rastreabilidade: [SPEC-03](../../specs/03-integracao-provedor.md),
-[criação no README](../../README.md#criação-de-solicitações),
+Rastreabilidade: [criação no README](../../README.md#criação-de-solicitações),
 `ActivationRequestProcessingIntegrationTests` (commit, scheduler, HTTP fora de
 transação e GET) e `ActivationRequestSchedulerRestartTests` (retomada segura e
 preservação do bloqueio de reconciliação).
@@ -77,11 +76,10 @@ independentemente dela. O `Location` acompanha somente a criação.
 **Alternativas consideradas:** confiar apenas em consulta seguida de inserção
 deixa uma janela de corrida; `synchronized` protege somente a mesma JVM;
 `@Version` protege atualizações, sem impedir inserções com UUIDs diferentes.
-Tornar a chave única por consumidor contraria a unicidade global prevista na
-[SPEC-02](../../specs/02-duplicidade-e-concorrencia.md). Rejeitar toda repetição
-com `409` impediria recuperar a representação de um pedido idêntico após perda
-da resposta; sobrescrever o payload ou reiniciar o processamento poderia mudar
-uma ativação já iniciada.
+Tornar a chave única por consumidor contraria a decisão de unicidade global.
+Rejeitar toda repetição com `409` impediria recuperar a representação de um
+pedido idêntico após perda da resposta; sobrescrever o payload ou reiniciar o
+processamento poderia mudar uma ativação já iniciada.
 
 **Consequências:** a API reutiliza o efeito local mesmo em criações concorrentes,
 mas depende do PostgreSQL e do tratamento correto da fronteira transacional.
@@ -346,8 +344,7 @@ com dependências simuladas. `ActivationRequestProviderRejectionTests` combina
 worker, cliente HTTP, WireMock e PostgreSQL para `400` e `503`, com scheduler
 desligado e contrato padrão conservador. `ActivationRequestProcessingIntegrationTests`
 reúne criação/commit, scheduler/worker, HTTP real e GET para sucesso, `500` e timeout;
-`ActivationRequestSchedulerRestartTests` cobre retomada com scheduler ativo,
-conforme [A04](../../PENDING_ACTIONS.md#a04--completar-a-evidência-do-processamento-integrado).
+`ActivationRequestSchedulerRestartTests` cobre retomada com scheduler ativo.
 `HttpActivationProviderRetryTests` e `ActivationRequestHttpRetryTests` cobrem
 interpretação de `Retry-After` no contrato opt-in e seu efeito no agendamento,
 nas chamadas efetivas e no limite de três tentativas.

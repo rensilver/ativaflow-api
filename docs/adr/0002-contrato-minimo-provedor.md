@@ -4,8 +4,8 @@ Data: 2026-10-29. Decisão: aceita e aplicada à integração HTTP e ao mock.
 
 ## Contexto e alcance
 
-A SPEC-03 exige `POST /provider/v1/activate`, mas registra que o enunciado não
-fornece schema completo de entrada e saída. Não existe contrato oficial adicional.
+O contrato definido para a integração usa `POST /provider/v1/activate`, mas não
+há schema completo oficial de entrada e saída. Não existe contrato oficial adicional.
 Os campos JSON, o retorno `204` e a rejeição permanente `400` sem ativação
 são **suposições do projeto confirmadas com o responsável**. O contrato opcional
 de rejeição antes da ativação em `429/503` é uma suposição técnica explicitamente
@@ -51,8 +51,7 @@ comportamento do cliente diante das respostas simuladas, sem validar autenticaç
 idempotência, capacidade ou semântica de um provedor real. Antes de mudar o
 destino, é necessário confirmar o contrato descrito nesta decisão.
 
-Rastreabilidade: [SPEC-03](../../specs/03-integracao-provedor.md),
-[Compose](../../docker-compose.yaml),
+Rastreabilidade: [Compose](../../docker-compose.yaml),
 [demonstração no README](../../README.md#provedor-simulado-no-compose),
 `HttpActivationProviderWireMockTests` e `ActivationRequestHttpRetryTests`.
 
@@ -131,8 +130,8 @@ da classificação. Não persistir nem registrar a resposta bruta.
 | Timeout de conexão/leitura, conexão interrompida ou ausência de resposta confiável | Efeito externo desconhecido. | `PROCESSING`, `reconciliation_required=true`; sem reenvio automático, inclusive na terceira tentativa. |
 | Demais respostas não contratadas, incluindo outros `2xx` e redirecionamentos, ou erro de provedor real sem garantia contratual de não ativação | Evidência insuficiente sobre o efeito externo. | `PROCESSING`, `reconciliation_required=true`; sem reenvio automático; revisar o contrato para classificar com segurança. |
 
-A referência genérica a sucesso `2xx` na SPEC-03 fica concretizada aqui por
-`200`, `201` e `204`. `202` exige tratamento separado porque indica processamento
+A referência genérica a sucesso `2xx` fica concretizada aqui por `200`, `201` e
+`204`. `202` exige tratamento separado porque indica processamento
 ainda não concluído ([RFC 9110, seção 15.3.3](https://www.rfc-editor.org/rfc/rfc9110.html#section-15.3.3)).
 O mock padrão usa `204`. Nenhum endpoint de consulta externa ou callback
 é presumido para resolver `202` ou timeout.
@@ -193,11 +192,10 @@ lease e esgotamento de tentativas não autorizam reenvio nem falha terminal pres
 
 ## Decisão de não usar Circuit Breaker
 
-**Contexto:** o provedor pode ficar lento ou indisponível. Conforme a
-[SPEC-03](../../specs/03-integracao-provedor.md), o escopo atual usa processamento
-assíncrono, timeouts configuráveis e até três tentativas totais apenas quando
-há garantia de não ativação. A criação não aguarda o HTTP e a chamada não mantém
-transação de banco aberta.
+**Contexto:** o provedor pode ficar lento ou indisponível. O escopo atual usa
+processamento assíncrono, timeouts configuráveis e até três tentativas totais
+apenas quando há garantia de não ativação. A criação não aguarda o HTTP e a
+chamada não mantém transação de banco aberta.
 
 **Decisão:** manter a integração sem Circuit Breaker nesta etapa. Timeouts
 limitam a espera da chamada, enquanto backoff, jitter e `Retry-After` regulam
@@ -254,8 +252,7 @@ PostgreSQL para `400/503`, sem scheduler. Os testes de persistência de resultad
 e ambiguidade verificam o limite de tentativas e o bloqueio de reenvio no banco.
 
 A cobertura conjunta de criação/commit → worker → HTTP → estado persistido/GET
-para sucesso, `500` e timeout, e a retomada com scheduler habilitado estão em
-[A04](../../PENDING_ACTIONS.md#a04--completar-a-evidência-do-processamento-integrado).
+inclui sucesso, `500` e timeout, além da retomada com scheduler habilitado.
 `HttpActivationProviderRetryTests` cobre contrato opt-in, segundos/data HTTP,
 header ausente, inválido, zero, passado, repetido e enorme, além da preservação
 das demais classificações. `ActivationRequestHttpRetryTests` combina worker,

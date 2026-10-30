@@ -73,6 +73,21 @@ class LocalJwtMaterialUnitTests {
 	}
 
 	@Test
+	void refusesMismatchedKeysWithoutReplacingExistingToken() throws Exception {
+		Path material = create();
+		Path other = create();
+		String existingHeader = Files.readString(material.resolve("authorization.header"));
+		Files.copy(other.resolve("public.pem"), material.resolve("public.pem"),
+				java.nio.file.StandardCopyOption.REPLACE_EXISTING);
+
+		var result = run(temporary, "token", material.toString());
+
+		assertThat(result.exitCode()).isNotZero();
+		assertThat(result.output()).contains("do not match");
+		assertThat(Files.readString(material.resolve("authorization.header"))).isEqualTo(existingHeader);
+	}
+
+	@Test
 	void restrictsAccessToDirectoryPrivateKeyAndBearerHeader() throws Exception {
 		Path material = create();
 		assertThat(Files.getPosixFilePermissions(material)).isEqualTo(PosixFilePermissions.fromString("rwx------"));
