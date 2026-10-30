@@ -9,6 +9,7 @@ import com.rensilver.ativaflow_api.dto.request.CreateActivationRequest;
 import com.rensilver.ativaflow_api.dto.response.ActivationRequestPageResponse;
 import com.rensilver.ativaflow_api.dto.response.ActivationRequestResponse;
 import com.rensilver.ativaflow_api.service.ActivationRequestService;
+import io.swagger.v3.oas.annotations.security.SecurityRequirement;
 import jakarta.validation.Valid;
 import jakarta.validation.constraints.Max;
 import jakarta.validation.constraints.Min;
@@ -28,6 +29,7 @@ import org.springframework.web.util.UriComponentsBuilder;
 
 @RestController
 @RequestMapping("/api/v1/requests")
+@SecurityRequirement(name = "bearerAuth")
 @RequiredArgsConstructor
 public class ActivationRequestController {
 
