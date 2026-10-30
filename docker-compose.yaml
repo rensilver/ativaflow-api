@@ -8,6 +8,11 @@ services:
     environment:
       SPRING_PROFILES_ACTIVE: local
       SERVER_PORT: "8080"
+      API_MAX_BODY_BYTES: ${API_MAX_BODY_BYTES:-16384}
+      API_RATE_LIMIT_ENABLED: ${API_RATE_LIMIT_ENABLED:-true}
+      API_RATE_LIMIT_REQUESTS: ${API_RATE_LIMIT_REQUESTS:-120}
+      API_RATE_LIMIT_WINDOW: ${API_RATE_LIMIT_WINDOW:-1m}
+      API_RATE_LIMIT_MAX_KEYS: ${API_RATE_LIMIT_MAX_KEYS:-10000}
       DB_URL: jdbc:postgresql://postgres:5432/ativaflow
       DB_USERNAME: ${DB_USERNAME:-ativaflow}
       DB_PASSWORD: ${DB_PASSWORD:?Preencha DB_PASSWORD no .env ou no ambiente}

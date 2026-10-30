@@ -21,6 +21,8 @@ spring:
     timeout-per-shutdown-phase: ${SHUTDOWN_TIMEOUT:30s}
 
 server:
+  # O fallback de rate limit usa o IP da conexão, sem confiar em headers do cliente.
+  forward-headers-strategy: none
   port: ${SERVER_PORT:8080}
   shutdown: graceful
   error:
@@ -31,6 +33,13 @@ server:
     include-path: never
 
 app:
+  http:
+    max-body-bytes: ${API_MAX_BODY_BYTES:16384}
+    rate-limit:
+      enabled: ${API_RATE_LIMIT_ENABLED:true}
+      requests: ${API_RATE_LIMIT_REQUESTS:120}
+      window: ${API_RATE_LIMIT_WINDOW:1m}
+      max-keys: ${API_RATE_LIMIT_MAX_KEYS:10000}
   worker:
     enabled: ${WORKER_ENABLED:true}
     poll-interval: ${WORKER_POLL_INTERVAL:250ms}

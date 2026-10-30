@@ -26,11 +26,11 @@ um resultado externo indeterminado permanece em `PROCESSING` e bloqueia reenvio.
 
 | Situação | Implementação, evidência ou limite |
 | --- | --- |
-| Implementado | API, validação e Problem Details; JWT/escopos/BOLA; unicidade global e repetição 201/200/409; worker, HTTP e persistência de resultados; Dockerfile e Compose. |
+| Implementado | API, validação e Problem Details; [limites de body/tráfego](#limites-de-body-e-tráfego); JWT/escopos/BOLA; unicidade global e repetição 201/200/409; worker, HTTP e persistência de resultados; Dockerfile e Compose. |
 | Cobertura automatizada existente | Testes de endpoints e concorrência com PostgreSQL/Testcontainers, autorização, cliente HTTP com WireMock, orquestração e recuperação. As suítes integradas de processamento e restart habilitam o scheduler explicitamente; as demais usam o padrão desligado do perfil `test`. Evidências em [Testes e integração contínua](#testes-e-integração-contínua). |
 | Demonstração documentada | [Roteiro completo](docs/container-image.md#demonstração-autenticada-e-retomada-de-pendências) de JWT, POST/GET, chamada ao mock e retomada de `PENDING` após recriação com volume persistente. A execução registrada em [A01](PENDING_ACTIONS.md#a01--empacotamento-e-execução-reproduzível) não substitui testes automatizados com scheduler ativo. |
 | Limitações da integração | Sem idempotência garantida pelo provedor, reconciliação automática ou renovação de lease. `429/503` são indeterminados por padrão; retry exige contrato explícito de não ativação. Timeouts continuam bloqueados para reconciliação. |
-| Próximas evoluções | Limites de body/tráfego; probes explícitas, Prometheus, métricas de negócio, logs JSON e tracing opcional. Detalhes e prioridades em [Ações pendentes](PENDING_ACTIONS.md). |
+| Próximas evoluções | Probes explícitas, Prometheus, métricas de negócio, logs JSON e tracing opcional. Detalhes e prioridades em [Ações pendentes](PENDING_ACTIONS.md). |
 
 ## Roteiro curto de uso
 
@@ -789,6 +789,75 @@ O controller de criação aciona a validação com `@Valid` no parâmetro
 `@RequestBody`. As anotações não validam automaticamente uma chamada direta ao
 construtor do record.
 
+## Limites de body e tráfego
+
+As rotas `/api/` têm dois controles configuráveis em `app.http`, ativos por
+padrão no ambiente local, no Compose e em produção:
+
+| Variável | Padrão | Intervalo aceito |
+| --- | --- | --- |
+| `API_MAX_BODY_BYTES` | `16384` (16 KiB) | 1 a 1048576 bytes (1 MiB). |
+| `API_RATE_LIMIT_ENABLED` | `true` | `true` ou `false`. |
+| `API_RATE_LIMIT_REQUESTS` | `120` | 1 a 1000000 requisições por identidade/janela. |
+| `API_RATE_LIMIT_WINDOW` | `1m` | 1 ms a 1 dia, com unidades de duração. |
+| `API_RATE_LIMIT_MAX_KEYS` | `10000` | 1 a 100000 identidades mantidas em memória. |
+
+Valores inválidos impedem a inicialização. O `.env.example` contém os padrões;
+o Compose repassa essas cinco variáveis para a API. Fora do Compose, carregue-as
+no ambiente conforme o roteiro existente.
+
+`ApiBodyLimitFilter` executa depois da correlação e antes da segurança/MVC.
+Rejeita `Content-Length` acima do teto sem ler o corpo. Para os demais envios,
+lê no máximo o teto mais um byte, inclusive sem tamanho declarado ou com
+transferência chunked. Apenas um corpo aceito é disponibilizado ao MVC em um
+buffer limitado; bytes UTF-8 e espaços após o JSON também contam. O excesso
+recebe **413**, antes de executar o controller ou persistir uma solicitação,
+com `detail: Request body is too large`. Esse controle vale para qualquer
+método nas rotas `/api/`; Bean Validation continua validando os campos. Os dois
+filtros usam o caminho decodificado do servlet, cobrindo também `/a%70i/`.
+
+`ApiRateLimitFilter` executa na cadeia Spring Security depois da autenticação
+Bearer e antes da autorização. Cada consumidor usa o `sub` validado do JWT;
+sem autenticação, a chave é o IP da conexão (`remoteAddr`). Headers como
+`X-Consumer-ID`, `Forwarded` e `X-Forwarded-For` não escolhem a identidade.
+`server.forward-headers-strategy: none` mantém essa política explícita. Atrás
+de proxy, clientes anônimos podem compartilhar a mesma cota; uma política de
+proxy confiável/gateway precisa ser definida antes de mudar esse comportamento.
+
+A janela fixa começa na primeira admissão de cada identidade e aceita até a
+cota configurada, somando métodos e rotas `/api/`. Ao esgotá-la, retorna **429**,
+`detail: Request rate limit exceeded` e `Retry-After` em segundos positivos,
+arredondados para cima até o fim da janela. Rejeições não prolongam a janela.
+A admissão usa relógio monotônico e é atômica sob concorrência. Identidades
+expiradas são renovadas ou removidas quando é necessário abrir espaço; ao
+atingir `max-keys`, novas identidades recebem 429 até liberar espaço, sem
+expulsar cotas ainda ativas. Há possibilidade de rajada entre duas janelas.
+
+O estado é **em memória, por instância**: restart renova as cotas e réplicas não
+compartilham contadores. Escala horizontal exige gateway ou backend distribuído.
+O filtro não limita JWT inválido rejeitado antes dele nem substitui proteção de
+borda contra abuso de conexões. Corpos excessivos recebem 413 antes da segurança;
+401/403 que alcançam o rate limiter consomem a cota correspondente. Health,
+Actuator e documentação ficam fora desses limites de aplicação.
+
+As respostas 413/429 usam o mesmo Problem Details seguro e correlacionado das
+demais respostas, com `X-Correlation-ID` e evento `api_request_rejected`, sem
+registrar body, JWT, IP ou identidade do consumidor. O profile `test` desabilita
+o rate limiter para não acumular cotas entre testes de outros fluxos; as suítes
+específicas usam instâncias próprias e habilitam explicitamente o controle.
+
+`ApiRequestLimitsHttpTests` executa HTTP real no Tomcat com JWT RS256 assinado,
+limites de 255/256/257 bytes, framing fixo/chunked, UTF-8, sufixo após o JSON,
+429, correlação, health e caminhos codificados. `ApiBodyLimitFilterTests` usa
+também um fluxo sem fim
+para provar a leitura máxima do prefixo. As suítes de filtro, configuração e
+`InMemoryRateLimiterTests` cobrem isolamento por consumidor/IP/instância,
+concorrência, expiração, capacidade, desativação e configurações inválidas.
+
+```bash
+./mvnw -B --no-transfer-progress '-Dtest=ApiRequestLimitsHttpTests,ApiBodyLimitFilterTests,ApiRateLimitFilterTests,InMemoryRateLimiterTests,HttpLimitConfigurationTests' test
+```
+
 ## Tratamento centralizado de erros
 
 `ApiExceptionHandler`, anotado com `@RestControllerAdvice`, estende
@@ -819,6 +888,8 @@ descrição padrão. Para status sem constante em `HttpStatus`, o código numér
 | Acesso negado | 403 | `Access is denied`, com desafio Bearer apropriado. |
 | Solicitação inexistente ou de outro consumidor | 404 | `Activation request not found`. |
 | Colisão de `externalId` | 409 | `Activation request conflict`. |
+| Corpo acima do teto configurado | 413 | `Request body is too large`. |
+| Cota de tráfego da API esgotada | 429 | `Request rate limit exceeded`, com `Retry-After`. |
 | Outros erros do MVC, como método ou mídia incompatíveis | Status do MVC | Mensagem segura, preservando cabeçalhos como `Allow`. |
 | Falha inesperada ou validação do valor retornado pelo controller | 500 | `An unexpected error occurred`. |
 

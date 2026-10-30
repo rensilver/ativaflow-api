@@ -8,6 +8,9 @@ spring:
           issuer-uri: https://issuer.example.test
 
 app:
+  http:
+    rate-limit:
+      enabled: false
   worker:
     enabled: false
   activation-provider:

@@ -2,6 +2,7 @@ package com.rensilver.ativaflow_api.security;
 
 import static org.springframework.security.config.Customizer.withDefaults;
 
+import com.rensilver.ativaflow_api.http.ApiRateLimitFilter;
 import org.springframework.boot.actuate.autoconfigure.security.servlet.EndpointRequest;
 import org.springframework.boot.actuate.endpoint.web.WebServerNamespace;
 import org.springframework.boot.actuate.health.HealthEndpoint;
@@ -12,14 +13,17 @@ import org.springframework.security.config.annotation.web.builders.HttpSecurity;
 import org.springframework.security.config.annotation.web.configurers.AbstractHttpConfigurer;
 import org.springframework.security.config.http.SessionCreationPolicy;
 import org.springframework.security.web.SecurityFilterChain;
+import org.springframework.security.web.access.intercept.AuthorizationFilter;
 import org.springframework.security.web.savedrequest.NullRequestCache;
 
 @Configuration(proxyBeanMethods = false)
 public class SecurityConfiguration {
 
 	@Bean
-	SecurityFilterChain securityFilterChain(HttpSecurity http, SecurityProblemHandler problemHandler) throws Exception {
+	SecurityFilterChain securityFilterChain(HttpSecurity http, SecurityProblemHandler problemHandler,
+			ApiRateLimitFilter rateLimitFilter) throws Exception {
 		return http
+				.addFilterBefore(rateLimitFilter, AuthorizationFilter.class)
 				.csrf(AbstractHttpConfigurer::disable)
 				.sessionManagement(session -> session.sessionCreationPolicy(SessionCreationPolicy.STATELESS))
 				.requestCache(cache -> cache.requestCache(new NullRequestCache()))
