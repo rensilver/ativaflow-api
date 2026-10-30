@@ -9,6 +9,7 @@ import java.util.stream.Stream;
 
 import com.rensilver.ativaflow_api.config.ActivationRetryProperties;
 import com.rensilver.ativaflow_api.domain.ProviderOutcome;
+import com.rensilver.ativaflow_api.model.ActivationRequest;
 import com.rensilver.ativaflow_api.repository.ActivationRequestRepository;
 import com.rensilver.ativaflow_api.service.model.PreparedActivationAttempt;
 import com.rensilver.ativaflow_api.service.policy.ActivationRetryPolicy;
@@ -19,6 +20,7 @@ import org.junit.jupiter.params.provider.CsvSource;
 import org.junit.jupiter.params.provider.MethodSource;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
+import org.springframework.test.util.ReflectionTestUtils;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.Mockito.verify;
@@ -55,9 +57,19 @@ class ActivationRequestOutcomeResilienceUnitTests {
 		var attempt = attempt(attemptCount);
 		when(repository.tryRecordConfirmedOutcome(ID, attempt.version(), "worker-a", attemptCount,
 				false, true, "PROVIDER_BUSY", expectedDelayMillis, retryAfter, maxAttempts)).thenReturn(1);
+		if (attemptCount < maxAttempts) {
+			var stored = ActivationRequest.create("EXT-1", "CUSTOMER-1", "PRODUCT-1", "consumer-a", "retry-1");
+			ReflectionTestUtils.setField(stored, "id", ID);
+			ReflectionTestUtils.setField(stored, "attemptCount", attemptCount);
+			ReflectionTestUtils.setField(stored, "nextAttemptAt", RETRY_AFTER);
+			when(repository.findById(ID)).thenReturn(Optional.of(stored));
+		}
 
 		assertThat(handler(maxAttempts).record(attempt,
 				new ProviderOutcome.TransientFailure("PROVIDER_BUSY", Optional.ofNullable(retryAfter)))).isTrue();
+		if (attemptCount < maxAttempts) {
+			verify(repository).findById(ID);
+		}
 		verifyNoMoreInteractions(repository);
 	}
 

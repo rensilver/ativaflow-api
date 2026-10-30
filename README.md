@@ -26,11 +26,11 @@ um resultado externo indeterminado permanece em `PROCESSING` e bloqueia reenvio.
 
 | Situação | Implementação, evidência ou limite |
 | --- | --- |
-| Implementado | API, validação e Problem Details; [limites de body/tráfego](#limites-de-body-e-tráfego); JWT/escopos/BOLA; unicidade global e repetição 201/200/409; worker, HTTP e persistência de resultados; Dockerfile e Compose; [probes de saúde](#probes-de-saúde) e [Prometheus protegido](#acesso-ao-prometheus). |
+| Implementado | API, validação e Problem Details; [limites de body/tráfego](#limites-de-body-e-tráfego); JWT/escopos/BOLA; unicidade global e repetição 201/200/409; worker, HTTP e persistência de resultados; Dockerfile e Compose; [probes de saúde](#probes-de-saúde), [Prometheus protegido](#acesso-ao-prometheus) e [eventos de processamento com JSON em produção](#eventos-de-processamento-nos-logs). |
 | Cobertura automatizada existente | Testes de endpoints e concorrência com PostgreSQL/Testcontainers, autorização, cliente HTTP com WireMock, orquestração e recuperação. As suítes integradas de processamento e restart habilitam o scheduler explicitamente; as demais usam o padrão desligado do perfil `test`. Evidências em [Testes e integração contínua](#testes-e-integração-contínua). |
 | Demonstração documentada | [Roteiro completo](docs/container-image.md#demonstração-autenticada-e-retomada-de-pendências) de JWT, POST/GET, chamada ao mock e retomada de `PENDING` após recriação com volume persistente. A execução registrada em [A01](PENDING_ACTIONS.md#a01--empacotamento-e-execução-reproduzível) não substitui testes automatizados com scheduler ativo. |
 | Limitações da integração | Sem idempotência garantida pelo provedor, reconciliação automática ou renovação de lease. `429/503` são indeterminados por padrão; retry exige contrato explícito de não ativação. Timeouts continuam bloqueados para reconciliação. |
-| Próximas evoluções | Logs JSON e tracing opcional. Detalhes e prioridades em [Ações pendentes](PENDING_ACTIONS.md). |
+| Próximas evoluções | Tracing opcional. Detalhes e prioridades em [Ações pendentes](PENDING_ACTIONS.md). |
 
 As decisões estão consolidadas nos dois ADRs existentes:
 [processamento assíncrono](docs/adr/0001-metadados-de-processamento.md#decisão-de-processamento-assíncrono-persistido)
@@ -553,14 +553,48 @@ válida do contexto atual em `X-Correlation-ID`; não copia `Authorization`, coo
 ou o JWT do consumidor. A autenticação própria de um provedor real depende de
 contrato futuro.
 
-Os eventos de tentativa são emitidos em nível `INFO` com campos estruturados
-SLF4J, visíveis no formato padrão do Logback:
+Os eventos de processamento são emitidos em nível `INFO` com campos estruturados
+SLF4J. O profile `prod` habilita JSON na saída padrão pelo
+[suporte nativo do Spring Boot 3.5](https://docs.spring.io/spring-boot/3.5/reference/features/logging.html#features.logging.structured.logstash),
+com `logging.structured.format.console=logstash` e banner desligado. Cada linha
+contém um objeto JSON com `@timestamp`, `level`, `logger_name`, `thread_name`,
+`message` e os campos aplicáveis abaixo. Números e booleanos preservam seus tipos;
+quebras de linha nas mensagens são escapadas. O formato legível permanece em
+`local` e `test`; o Compose usa `local`. Para coletar JSON também nesse ambiente,
+defina `LOGGING_STRUCTURED_FORMAT_CONSOLE=logstash` no processo da aplicação
+(no Compose, por um override de `services.app.environment`).
+
+### Eventos de processamento nos logs
 
 | Evento (`event`) | Campos técnicos |
 | --- | --- |
+| `activation_request_created` | `correlationId`, `requestId` interno e `status=PENDING`, somente na inserção nova. Reutilização idempotente não gera outra criação. |
+| `activation_request_claimed` | `correlationId` persistida, `requestId`, `attempt` já consumido, `leaseUntil` e `recovered`, que indica retomada direta de um lease vencido. O claim ainda exige preparação antes do HTTP. |
+| `activation_leases_recovered` | `recoveredCount`, quantidade liberada pelo serviço de recuperação em lote; não tem correlação individual nem herda a correlação da thread. O worker retoma leases vencidos diretamente pelo claim. |
+| `activation_retry_scheduled` | `correlationId` persistida, `requestId`, `attempt` consumido e `nextAttemptAt`, relido do banco com backoff/jitter e `Retry-After` aplicados. |
 | `activation_attempt_started` | `correlationId`, `requestId` interno e `attempt` com o contador já persistido, antes de chamar o provedor. |
 | `activation_provider_attempt` | `correlationId`, `httpStatus`, `responseCategory`, `durationMs` e `result`, uma vez por chamada ao cliente HTTP. |
 | `activation_attempt_finished` | `correlationId`, `requestId`, `attempt`, `result` e `persistence`, após a tentativa de gravar o resultado. |
+
+Criação, claim, recuperação em lote e agendamento são emitidos após o commit da
+respectiva transação, com cópia dos campos técnicos. Rollback, polling vazio,
+lote sem recuperação e resultado obsoleto não anunciam trabalho confirmado.
+O evento de retry exige falha transitória segura e tentativas restantes; sucesso,
+falha permanente, resultado indeterminado e limite esgotado não o geram. A releitura
+do prazo acrescenta uma consulta por retry agendado, dentro da transação curta.
+Registros antigos sem correlação válida usam o UUID interno como fallback,
+conforme o worker. O MDC anterior é restaurado após cada evento.
+
+Exemplo de uma linha no profile `prod` (identificadores ilustrativos):
+
+```json
+{"@timestamp":"2026-10-30T10:00:00Z","@version":"1","message":"Activation request lifecycle event","logger_name":"com.rensilver.ativaflow_api.service.ActivationRequestCreationTransaction","thread_name":"http-nio-8080-exec-1","level":"INFO","level_value":20000,"correlationId":"client-request-123","event":"activation_request_created","requestId":"ef9147a7-f092-46cb-ab55-d2f5dfb86bf0","status":"PENDING"}
+```
+
+`traceId` só deve aparecer quando houver tracing real; a correlação atual não
+implementa tracing distribuído (A10). Logs são evidência operacional e não um
+registro de auditoria durável: uma interrupção entre commit e emissão pode perder
+o evento. Nenhum mecanismo de outbox foi adicionado para logs.
 
 `responseCategory` distingue `HTTP_2XX`, `HTTP_3XX`, `HTTP_4XX`, `HTTP_5XX`,
 `TIMEOUT`, `COMMUNICATION_FAILURE` e `UNEXPECTED_ERROR`. `httpStatus=0` indica
@@ -580,14 +614,18 @@ Um resultado HTTP `SUCCESS` só tem gravação confirmada quando o worker regist
 
 Os eventos usam uma lista explícita de campos técnicos: não incluem payloads,
 identificadores de negócio/cliente, headers, URLs, credenciais, códigos de erro
-livres, mensagens ou stack traces de exceções. Os eventos do worker e do cliente
+livres, mensagens ou stack traces de exceções. Os eventos individuais
 podem ser relacionados por `correlationId`. Os testes unitários
 `HttpActivationProviderLoggingTests` e `ActivationRequestWorkerLoggingTests`
 cobrem classificação, duração, identificação da tentativa, falhas de persistência
-e ausência de dados sensíveis. Para executar somente esses testes:
+e ausência de dados sensíveis. `ActivationRequestLifecycleLoggingTests` verifica
+os novos eventos com PostgreSQL real, commit/rollback, correlação, recuperação e
+ausência de dados de negócio. `StructuredLoggingTests` inicializa processos Java
+isolados com a configuração real dos profiles para validar as linhas JSON, tipos,
+MDC e escape de mensagens, preservando o formato local. Para executar essa cobertura:
 
 ```bash
-./mvnw -Dtest=HttpActivationProviderLoggingTests,ActivationRequestWorkerLoggingTests test
+./mvnw -Dtest=HttpActivationProviderLoggingTests,ActivationRequestWorkerLoggingTests,ActivationRequestLifecycleLoggingTests,StructuredLoggingTests test
 ```
 
 A chamada envia `Content-Type: application/json` e apenas os três valores
@@ -1870,7 +1908,7 @@ latência/categoria/timeout/retry do provedor e totais por estado em cache,
 conforme as [métricas coletadas](#métricas-coletadas). O timer do provedor inclui
 buckets para percentis aproximados. Histogramas de entrada HTTP, duração por
 etapa e idade individual do backlog continuam como evoluções de diagnóstico.
-Logs JSON/tracing distribuído não estão habilitados.
+Logs JSON estão habilitados no profile `prod`; tracing distribuído continua pendente.
 Se tracing for adicionado, usar `traceId` e spans de entrada, banco e worker/HTTP
 externo; `correlationId` sozinho não fornece esses tempos. Proteger o acesso
 operacional, usar tags de baixa cardinalidade e manter IDs apenas em logs/traces,
