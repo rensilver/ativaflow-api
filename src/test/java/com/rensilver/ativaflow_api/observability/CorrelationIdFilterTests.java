@@ -13,6 +13,7 @@ import org.slf4j.MDC;
 import org.springframework.context.annotation.AnnotationConfigApplicationContext;
 import org.springframework.context.annotation.ComponentScan;
 import org.springframework.context.annotation.Configuration;
+import org.springframework.context.annotation.FilterType;
 import org.springframework.mock.web.MockHttpServletRequest;
 import org.springframework.mock.web.MockHttpServletResponse;
 
@@ -110,7 +111,9 @@ class CorrelationIdFilterTests {
 	}
 
 	@Configuration(proxyBeanMethods = false)
-	@ComponentScan(basePackages = "com.rensilver.ativaflow_api.observability")
+	@ComponentScan(basePackages = "com.rensilver.ativaflow_api.observability",
+			excludeFilters = @ComponentScan.Filter(type = FilterType.ASSIGNABLE_TYPE,
+					classes = ActivationRequestStateMetrics.class))
 	static class FilterConfiguration {
 	}
 }

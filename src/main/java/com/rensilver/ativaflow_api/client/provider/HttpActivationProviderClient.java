@@ -3,6 +3,7 @@ package com.rensilver.ativaflow_api.client.provider;
 import java.net.SocketTimeoutException;
 import java.net.http.HttpTimeoutException;
 import java.time.DateTimeException;
+import java.time.Duration;
 import java.time.Instant;
 import java.util.Objects;
 import java.util.Optional;
@@ -12,6 +13,9 @@ import com.rensilver.ativaflow_api.client.provider.dto.ActivationProviderRequest
 import com.rensilver.ativaflow_api.config.ActivationProviderProperties.RetryContract;
 import com.rensilver.ativaflow_api.domain.ProviderOutcome;
 import com.rensilver.ativaflow_api.observability.CorrelationId;
+import io.micrometer.core.instrument.MeterRegistry;
+import io.micrometer.core.instrument.Timer;
+import io.micrometer.core.instrument.composite.CompositeMeterRegistry;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.http.HttpHeaders;
@@ -28,14 +32,20 @@ public class HttpActivationProviderClient implements ActivationProviderClient {
 
 	private final RestClient restClient;
 	private final RetryContract retryContract;
+	private final MeterRegistry registry;
 
 	public HttpActivationProviderClient(RestClient restClient) {
 		this(restClient, RetryContract.NONE);
 	}
 
 	public HttpActivationProviderClient(RestClient restClient, RetryContract retryContract) {
+		this(restClient, retryContract, new CompositeMeterRegistry());
+	}
+
+	public HttpActivationProviderClient(RestClient restClient, RetryContract retryContract, MeterRegistry registry) {
 		this.restClient = restClient;
 		this.retryContract = Objects.requireNonNull(retryContract);
+		this.registry = Objects.requireNonNull(registry);
 	}
 
 	@Override
@@ -89,6 +99,12 @@ public class HttpActivationProviderClient implements ActivationProviderClient {
 					? "PROVIDER_TIMEOUT" : "PROVIDER_COMMUNICATION_FAILURE");
 		}
 		finally {
+			Timer.builder("activation.provider.attempts")
+					.description("Duration and outcome of each provider HTTP attempt")
+					.tags("category", responseCategory, "result", result)
+					.serviceLevelObjectives(Duration.ofMillis(100), Duration.ofMillis(500),
+							Duration.ofSeconds(1), Duration.ofSeconds(2), Duration.ofSeconds(5), Duration.ofSeconds(10))
+					.register(registry).record(System.nanoTime() - startedAt, TimeUnit.NANOSECONDS);
 			// Lista explícita de campos técnicos: nunca incluir request, response, URL ou exception.
 			log.atInfo().addKeyValue("event", "activation_provider_attempt")
 					.addKeyValue("correlationId", CorrelationId.current())

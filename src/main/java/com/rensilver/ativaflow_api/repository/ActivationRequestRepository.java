@@ -8,6 +8,7 @@ import java.util.UUID;
 
 import com.rensilver.ativaflow_api.domain.ActivationStatus;
 import com.rensilver.ativaflow_api.model.ActivationRequest;
+import jakarta.persistence.QueryHint;
 import jakarta.persistence.criteria.Predicate;
 import org.springframework.data.domain.Page;
 import org.springframework.data.domain.Pageable;
@@ -15,6 +16,7 @@ import org.springframework.data.jpa.repository.JpaRepository;
 import org.springframework.data.jpa.repository.JpaSpecificationExecutor;
 import org.springframework.data.jpa.repository.Modifying;
 import org.springframework.data.jpa.repository.Query;
+import org.springframework.data.jpa.repository.QueryHints;
 import org.springframework.data.repository.query.Param;
 import org.springframework.lang.Nullable;
 import org.springframework.transaction.annotation.Propagation;
@@ -22,6 +24,17 @@ import org.springframework.transaction.annotation.Transactional;
 
 public interface ActivationRequestRepository extends JpaRepository<ActivationRequest, UUID>,
 		JpaSpecificationExecutor<ActivationRequest> {
+
+	interface StateCount {
+		ActivationStatus getState();
+		long getTotal();
+	}
+
+	/** One bounded-result aggregate per refresh, never per scrape. */
+	@Transactional(readOnly = true, timeout = 5)
+	@QueryHints(@QueryHint(name = "jakarta.persistence.query.timeout", value = "5000"))
+	@Query("SELECT request.status AS state, COUNT(request) AS total FROM ActivationRequest request GROUP BY request.status")
+	List<StateCount> countByState();
 
 	/** Mantém o lock até o término da transação curta que também executa tryClaim. */
 	@Transactional(propagation = Propagation.MANDATORY)

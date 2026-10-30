@@ -30,7 +30,7 @@ um resultado externo indeterminado permanece em `PROCESSING` e bloqueia reenvio.
 | Cobertura automatizada existente | Testes de endpoints e concorrência com PostgreSQL/Testcontainers, autorização, cliente HTTP com WireMock, orquestração e recuperação. As suítes integradas de processamento e restart habilitam o scheduler explicitamente; as demais usam o padrão desligado do perfil `test`. Evidências em [Testes e integração contínua](#testes-e-integração-contínua). |
 | Demonstração documentada | [Roteiro completo](docs/container-image.md#demonstração-autenticada-e-retomada-de-pendências) de JWT, POST/GET, chamada ao mock e retomada de `PENDING` após recriação com volume persistente. A execução registrada em [A01](PENDING_ACTIONS.md#a01--empacotamento-e-execução-reproduzível) não substitui testes automatizados com scheduler ativo. |
 | Limitações da integração | Sem idempotência garantida pelo provedor, reconciliação automática ou renovação de lease. `429/503` são indeterminados por padrão; retry exige contrato explícito de não ativação. Timeouts continuam bloqueados para reconciliação. |
-| Próximas evoluções | Verificação completa das métricas automáticas, métricas de negócio, logs JSON e tracing opcional. Detalhes e prioridades em [Ações pendentes](PENDING_ACTIONS.md). |
+| Próximas evoluções | Logs JSON e tracing opcional. Detalhes e prioridades em [Ações pendentes](PENDING_ACTIONS.md). |
 
 As decisões estão consolidadas nos dois ADRs existentes:
 [processamento assíncrono](docs/adr/0001-metadados-de-processamento.md#decisão-de-processamento-assíncrono-persistido)
@@ -1632,8 +1632,89 @@ permissão do arquivo e preservação do header da API. Execute:
   -Dtest=PrometheusEndpointIntegrationTests,LocalAccessTokenMaterialUnitTests test
 ```
 
-A verificação completa das métricas automáticas e as métricas específicas de
-negócio continuam no terceiro item de A08 em [PENDING_ACTIONS.md](PENDING_ACTIONS.md).
+### Métricas coletadas
+
+O mesmo endpoint autenticado publica as métricas automáticas de HTTP, JVM e
+Hikari e a instrumentação do processamento:
+
+| Série Prometheus | Significado e tags |
+| --- | --- |
+| `http_server_requests_seconds_count`, `_sum` | Quantidade e duração do HTTP de entrada, por rota normalizada, método e status. |
+| `jvm_memory_used_bytes`, `jvm_threads_live_threads`, `jvm_gc_pause_seconds_count` | Memória, threads e pausas de GC (a série de pausas aparece após uma coleta). |
+| `hikaricp_connections_active`, `_idle`, `_pending`, `_timeout_total`, `_acquire_seconds_count` | Uso do pool, espera, timeout e duração de aquisição; tag `pool`. |
+| `activation_provider_attempts_seconds_count`, `_sum`, `_bucket` | Uma amostra por chamada ao provedor, incluindo falhas; tags `category` e `result`. |
+| `activation_provider_retries_total` | Tentativas enviadas pelo worker após a primeira tentativa persistida. Não conta apenas o agendamento, nem claims sem preparação válida. |
+| `activation_requests` | Quantidade persistida por `state`: `PENDING`, `PROCESSING`, `COMPLETED`, `FAILED`, incluindo zero para estados ausentes. |
+| `activation_requests_snapshot_timestamp` | Horário Unix em segundos da última atualização bem-sucedida das contagens. Zero enquanto não houve atualização. |
+| `activation_requests_snapshot_failures_total` | Falhas de atualização das contagens; sem detalhes do banco nas tags. |
+
+O timer do provedor usa categorias fixas: famílias `HTTP_2XX`, `HTTP_4XX`,
+`HTTP_5XX` (outra família HTTP recebida segue o mesmo formato), `TIMEOUT`,
+`COMMUNICATION_FAILURE` e `UNEXPECTED_ERROR`. Os resultados são `SUCCESS`,
+`PERMANENT_FAILURE`, `TRANSIENT_FAILURE`, `INDETERMINATE` e `UNEXPECTED_ERROR`.
+Timeout continua indeterminado; observabilidade não autoriza retry.
+As séries do timer são criadas quando a combinação ocorre e medem somente a
+chamada, sem backoff, espera na fila ou gravação do resultado. O contador de retry
+mede o despacho local e não comprova recebimento ou conclusão no provedor.
+IDs, consumidor, cliente, produto, correlação, URL, payload e mensagens de erro
+não são tags das métricas específicas.
+
+As contagens usam uma única consulta `GROUP BY status`, com timeout de consulta
+de 5 segundos, a cada 30 segundos após o término da atualização anterior.
+O scheduler é separado do worker; a obtenção de conexão também está sujeita ao
+`DB_CONNECTION_TIMEOUT_MS`. O scrape lê somente um snapshot imutável em memória,
+sem executar SQL. Ajuste o intervalo com a propriedade Spring
+`app.metrics.state-refresh-interval`, por exemplo
+`--app.metrics.state-refresh-interval=1m`. A primeira atualização é agendada na
+inicialização. Antes dela os totais são `NaN`; em falha, os últimos valores e seu
+horário permanecem disponíveis e o contador de falhas aumenta. Monitore a idade
+do snapshot para não tratar dados antigos como contagens atuais.
+
+A consulta retorna no máximo quatro linhas, mas ainda pode percorrer toda a
+tabela: em bases grandes, aumente o intervalo e avalie pré-agregação conforme
+medição. Cada instância consulta o mesmo banco; **não some** esses totais entre
+réplicas. Contadores e timers são locais à instância e reiniciam com o processo;
+as contagens persistidas são reconstruídas após reinício. Use `max by (state)`
+para visualizar uma aproximação dos totais entre réplicas, considerando a idade
+dos snapshots.
+
+Exemplos PromQL (janela de 5 minutos):
+
+```promql
+# Latência média em segundos por categoria.
+sum by (category) (rate(activation_provider_attempts_seconds_sum[5m]))
+/
+sum by (category) (rate(activation_provider_attempts_seconds_count[5m]))
+
+# Timeouts e retries por segundo.
+sum(rate(activation_provider_attempts_seconds_count{category="TIMEOUT"}[5m]))
+sum(rate(activation_provider_retries_total[5m]))
+
+# p95 aproximado: buckets em 0,1 / 0,5 / 1 / 2 / 5 / 10 segundos e +Inf.
+histogram_quantile(0.95, sum by (le) (rate(activation_provider_attempts_seconds_bucket[5m])))
+
+# Idade do snapshot em segundos, por instância; timestamp zero indica ausência de coleta.
+time() - activation_requests_snapshot_timestamp
+```
+
+O p95/p99 obtido por esses buckets é uma aproximação; valores acima de 10 segundos
+não têm resolução adicional. Histogramas de HTTP de entrada não são habilitados
+por esta tarefa. A instrumentação reutiliza as
+[métricas automáticas do Spring Boot 3.5](https://docs.spring.io/spring-boot/3.5/reference/actuator/metrics.html)
+e os [gauges do Micrometer](https://docs.micrometer.io/micrometer/reference/concepts/gauges.html).
+
+`ActivationMetricsIntegrationTests` combina PostgreSQL real, WireMock, worker,
+registry ativo e scrape via MockMvc para conferir duração, classificação, timeout,
+retries efetivos, totais após mudanças de estado e remoção de registros.
+`ActivationRequestStateMetricsTests` confere leitura sem SQL, falha inicial,
+preservação do snapshot, recuperação e indisponibilidade transacional.
+`PrometheusEndpointIntegrationTests`
+comprova HTTP/JVM/Hikari pelo endpoint HTTP real e mantém os testes de JWT/escopo.
+
+```bash
+./mvnw -B --no-transfer-progress \
+  -Dtest=ActivationMetricsIntegrationTests,ActivationRequestStateMetricsTests,PrometheusEndpointIntegrationTests test
+```
 
 ## Documentação OpenAPI e Swagger UI
 
@@ -1784,9 +1865,11 @@ No banco, examinar locks, transações longas, I/O e `wait_event` em
 Acrescentar duração por etapa, p95/p99 do provedor, erros/timeouts/retries por
 categoria e vazão/idade do backlog para distinguir espera de processamento.
 
-Essas são necessidades de coleta: o [Prometheus está exposto com acesso restrito](#acesso-ao-prometheus),
-mas a verificação completa das métricas automáticas, as métricas de negócio e os
-histogramas/percentis ainda precisam de configuração ou instrumentação.
+O [Prometheus com acesso restrito](#acesso-ao-prometheus) já publica HTTP/JVM/Hikari,
+latência/categoria/timeout/retry do provedor e totais por estado em cache,
+conforme as [métricas coletadas](#métricas-coletadas). O timer do provedor inclui
+buckets para percentis aproximados. Histogramas de entrada HTTP, duração por
+etapa e idade individual do backlog continuam como evoluções de diagnóstico.
 Logs JSON/tracing distribuído não estão habilitados.
 Se tracing for adicionado, usar `traceId` e spans de entrada, banco e worker/HTTP
 externo; `correlationId` sozinho não fornece esses tempos. Proteger o acesso

@@ -73,7 +73,12 @@ class PrometheusEndpointIntegrationTests {
 
 		assertThat(response.statusCode()).isEqualTo(200);
 		assertThat(response.headers().firstValue("Content-Type").orElseThrow()).startsWith("text/plain");
-		assertThat(response.body()).contains("# HELP ", "# TYPE ", "jvm_memory_used_bytes");
+		assertThat(response.body()).contains("# HELP ", "# TYPE ", "jvm_memory_used_bytes",
+				"jvm_threads_live_threads", "hikaricp_connections_active", "hikaricp_connections_idle",
+				"hikaricp_connections_pending", "hikaricp_connections_timeout_total");
+		// The first request has completed, so its server timer is available on the next real HTTP scrape.
+		assertThat(get(PATH, token("monitoring/read", KEYS, Instant.now().plusSeconds(300))).body())
+				.contains("http_server_requests_seconds_count");
 		assertThat(response.headers().allValues("Set-Cookie")).isEmpty();
 	}
 
