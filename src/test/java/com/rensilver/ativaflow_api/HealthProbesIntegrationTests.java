@@ -105,7 +105,7 @@ class HealthProbesIntegrationTests {
 	}
 
 	@ParameterizedTest
-	@ValueSource(strings = {"env", "configprops", "heapdump", "metrics", "prometheus", "info"})
+	@ValueSource(strings = {"env", "configprops", "heapdump", "metrics", "info"})
 	void otherActuatorEndpointsRemainProtectedAndUnexposed(@NonNull String endpoint) throws Exception {
 		mvc.perform(get("/actuator/" + endpoint))
 				.andExpect(status().isUnauthorized());

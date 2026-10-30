@@ -33,6 +33,8 @@ public class SecurityConfiguration {
 						.requestMatchers(EndpointRequest.to(HealthEndpoint.class),
 								EndpointRequest.toAdditionalPaths(WebServerNamespace.SERVER, HealthEndpoint.class))
 						.permitAll()
+						.requestMatchers(EndpointRequest.to("prometheus"))
+						.hasAuthority("SCOPE_monitoring/read")
 						.requestMatchers(HttpMethod.POST, "/api/v1/requests")
 						.hasAuthority("SCOPE_requests/write")
 						.requestMatchers(HttpMethod.GET, "/api/v1/requests", "/api/v1/requests/**")

@@ -51,6 +51,13 @@ chave é escrito no console. O token tem `iss=https://ativaflow.local`,
 `scope="requests/read requests/write"`, `iat`, `nbf`, `exp`
 e header `kid`.
 Esses valores são exclusivos da demonstração local.
+Esse token de consumidor não permite consultar `/actuator/prometheus`.
+Para gerar uma credencial separada de monitoramento com as mesmas chaves, execute
+`java scripts/LocalJwt.java monitor-token "$JWT_DEMO_DIR"`: grava somente
+`monitoring.header` com permissão `600`, `sub=prometheus`, `scope=monitoring/read`
+e validade de cinco minutos. Repita o comando para renovar; ele preserva o header
+do consumidor. A configuração e a coleta estão em
+[acesso ao Prometheus](../README.md#acesso-ao-prometheus).
 
 ## Modo 1: PEM sem servidor de chaves
 
@@ -168,6 +175,7 @@ unset JWT_JWKS_PID
 Em seguida, remova os arquivos gerados e as variáveis nos terminais utilizados:
 
 ```bash
+rm -f -- "$JWT_DEMO_DIR/monitoring.header" "$JWT_DEMO_DIR/monitoring.token"
 rm -- "$JWT_DEMO_DIR/private.pem" "$JWT_DEMO_DIR/public.pem" \
   "$JWT_DEMO_DIR/authorization.header" "$JWT_DEMO_DIR/env.sh" \
   "$JWT_DEMO_DIR/jwks/jwks.json"

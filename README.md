@@ -26,11 +26,11 @@ um resultado externo indeterminado permanece em `PROCESSING` e bloqueia reenvio.
 
 | Situação | Implementação, evidência ou limite |
 | --- | --- |
-| Implementado | API, validação e Problem Details; [limites de body/tráfego](#limites-de-body-e-tráfego); JWT/escopos/BOLA; unicidade global e repetição 201/200/409; worker, HTTP e persistência de resultados; Dockerfile e Compose; [probes de saúde](#probes-de-saúde). |
+| Implementado | API, validação e Problem Details; [limites de body/tráfego](#limites-de-body-e-tráfego); JWT/escopos/BOLA; unicidade global e repetição 201/200/409; worker, HTTP e persistência de resultados; Dockerfile e Compose; [probes de saúde](#probes-de-saúde) e [Prometheus protegido](#acesso-ao-prometheus). |
 | Cobertura automatizada existente | Testes de endpoints e concorrência com PostgreSQL/Testcontainers, autorização, cliente HTTP com WireMock, orquestração e recuperação. As suítes integradas de processamento e restart habilitam o scheduler explicitamente; as demais usam o padrão desligado do perfil `test`. Evidências em [Testes e integração contínua](#testes-e-integração-contínua). |
 | Demonstração documentada | [Roteiro completo](docs/container-image.md#demonstração-autenticada-e-retomada-de-pendências) de JWT, POST/GET, chamada ao mock e retomada de `PENDING` após recriação com volume persistente. A execução registrada em [A01](PENDING_ACTIONS.md#a01--empacotamento-e-execução-reproduzível) não substitui testes automatizados com scheduler ativo. |
 | Limitações da integração | Sem idempotência garantida pelo provedor, reconciliação automática ou renovação de lease. `429/503` são indeterminados por padrão; retry exige contrato explícito de não ativação. Timeouts continuam bloqueados para reconciliação. |
-| Próximas evoluções | Prometheus, métricas de negócio, logs JSON e tracing opcional. Detalhes e prioridades em [Ações pendentes](PENDING_ACTIONS.md). |
+| Próximas evoluções | Verificação completa das métricas automáticas, métricas de negócio, logs JSON e tracing opcional. Detalhes e prioridades em [Ações pendentes](PENDING_ACTIONS.md). |
 
 As decisões estão consolidadas nos dois ADRs existentes:
 [processamento assíncrono](docs/adr/0001-metadados-de-processamento.md#decisão-de-processamento-assíncrono-persistido)
@@ -1490,8 +1490,9 @@ docker compose down
 ## Probes de saúde
 
 As probes estão habilitadas explicitamente em `application.yaml`, inclusive no
-perfil `local`, na mesma porta HTTP da API. Apenas o endpoint `health` está
-exposto pelo Actuator. Health e seus grupos permitem consultas sem JWT e ocultam
+perfil `local`, na mesma porta HTTP da API. O Actuator expõe `health` e
+`prometheus`, com [acesso de monitoramento](#acesso-ao-prometheus) específico.
+Health e seus grupos permitem consultas sem JWT e ocultam
 componentes, detalhes do banco e exceções, inclusive para consumidores autenticados.
 
 | Caminho | Critério | Resposta em caso de falha |
@@ -1521,10 +1522,9 @@ existindo, mas o check da API não o consulta. O Compose marca o container como
 `unhealthy` se o check falhar; isso não reinicia o container nem bloqueia sua porta
 automaticamente. Um futuro orquestrador deverá usar cada probe para sua finalidade.
 
-`/actuator/env`, `/actuator/configprops`, `/actuator/heapdump`, `/actuator/metrics`,
-`/actuator/info` e `/actuator/prometheus` continuam sem exposição HTTP. Sem JWT,
+`/actuator/env`, `/actuator/configprops`, `/actuator/heapdump`, `/actuator/metrics`
+e `/actuator/info` continuam sem exposição HTTP. Sem JWT,
 a segurança responde 401; com autenticação válida, essas rotas respondem 404.
-A política de acesso ao Prometheus será definida no próximo item de A08.
 
 `HealthProbesIntegrationTests` carrega os perfis `local` e `test`, PostgreSQL real
 via Testcontainers e a cadeia de segurança da aplicação. Exercita os grupos,
@@ -1538,6 +1538,102 @@ Para executar essa classe:
 ```bash
 ./mvnw -B --no-transfer-progress -Dtest=HealthProbesIntegrationTests test
 ```
+
+## Acesso ao Prometheus
+
+`GET /actuator/prometheus` está exposto na mesma porta da API em todos os perfis.
+Usa o registry Prometheus já presente no projeto e exige JWT válido com o escopo
+`monitoring/read` (authority `SCOPE_monitoring/read`). A regra usa o identificador
+do endpoint Actuator, acompanhando seu caminho configurado. Health continua público.
+
+| Credencial na coleta | Resultado |
+| --- | --- |
+| Sem Bearer, assinatura inválida ou token expirado | 401, com desafio Bearer. |
+| JWT válido sem `monitoring/read`, inclusive com `requests/read requests/write` | 403, Problem Details e `insufficient_scope`. |
+| JWT válido com `monitoring/read` | 200, métricas no formato Prometheus. |
+
+A política operacional é usar uma identidade exclusiva do coletor, com apenas
+`monitoring/read`, emitida pelo mesmo emissor confiável e para a audience da API.
+Esse token não concede leitura ou criação de solicitações. Cabe ao administrador
+do emissor restringir a concessão desse escopo e renovar o token antes da expiração;
+a API valida o JWT e não emite credenciais. Os demais endpoints administrativos
+listados acima continuam sem exposição.
+
+No Compose, a porta publicada da API permanece em loopback. Em produção, mantenha
+o acesso à coleta em rede interna, restrito ao monitoramento, e use HTTPS na
+entrada; não publique o caminho de métricas no ingresso público. A aplicação não
+cria porta de administração separada, firewall, servidor Prometheus ou renovador
+de credenciais. O endpoint não participa da cota de tráfego das rotas `/api/`.
+
+Para conferir localmente, inicie a API com as chaves do
+[roteiro JWT](docs/local-jwt.md). Com `JWT_DEMO_DIR` apontando para o mesmo material:
+
+```bash
+java scripts/LocalJwt.java monitor-token "$JWT_DEMO_DIR"
+curl --fail --silent --show-error http://localhost:8080/actuator/prometheus \
+  --header @"$JWT_DEMO_DIR/monitoring.header"
+```
+
+O comando grava `monitoring.header` com permissão `600`, `sub=prometheus`, apenas
+`scope=monitoring/read` e validade de cinco minutos. Repeti-lo renova o token com
+as mesmas chaves, preservando `authorization.header` e os escopos do consumidor
+da API. O token fica em arquivo, sem impressão no console ou na linha de comando.
+No ambiente em que `/tmp` estiver dentro de um checkout Git, use
+`java -Djava.io.tmpdir=/var/tmp scripts/LocalJwt.java create` na geração inicial.
+
+Exemplo de configuração para um Prometheus executado no host local:
+
+```yaml
+scrape_configs:
+  - job_name: ativaflow-api
+    metrics_path: /actuator/prometheus
+    scrape_interval: 30s
+    scrape_timeout: 5s
+    scheme: http
+    authorization:
+      type: Bearer
+      credentials_file: /run/secrets/ativaflow-monitoring.token
+    static_configs:
+      - targets: ['127.0.0.1:8080']
+```
+
+O arquivo `credentials_file`, acessível ao processo Prometheus, deve conter somente
+o JWT, sem `Authorization:` nem `Bearer`. Para a demonstração, prepare sua origem
+fora do Git e monte-a somente para leitura no caminho indicado:
+
+```bash
+(
+  umask 077
+  sed 's/^Authorization: Bearer //' "$JWT_DEMO_DIR/monitoring.header" \
+    > "$JWT_DEMO_DIR/monitoring.token"
+)
+```
+
+Após cada renovação local, atualize também `monitoring.token`. O exemplo não
+implementa renovação automática. Em produção, forneça e renove a credencial pelo
+fluxo do emissor externo, com armazenamento protegido, conforme a
+[gestão de segredos](docs/resource-server.md). Ajuste endereço, porta, caminho
+e `scheme: https` ao ambiente; dentro de outro container, `127.0.0.1` é o próprio
+container. A sintaxe de autenticação segue a
+[configuração oficial do Prometheus](https://prometheus.io/docs/prometheus/latest/configuration/configuration/#http_config);
+a exposição segue o [Actuator do Spring Boot 3.5](https://docs.spring.io/spring-boot/3.5/reference/actuator/endpoints.html#actuator.endpoints.exposing).
+Remova os dois arquivos de monitoramento junto com o material JWT ao encerrar
+a demonstração, seguindo a [limpeza do roteiro local](docs/local-jwt.md#encerrar-e-remover-material).
+
+`PrometheusEndpointIntegrationTests` valida o scrape e sua restrição por HTTP real,
+com PostgreSQL via Testcontainers, registry ativo e JWT RS256 assinado validado
+pelo decoder local da aplicação. Cobre ausência de token, escopos insuficientes,
+assinatura inválida, expiração, isolamento das operações de negócio e manutenção
+da exposição mínima. O teste do utilitário confere escopo, assinatura, validade,
+permissão do arquivo e preservação do header da API. Execute:
+
+```bash
+./mvnw -B --no-transfer-progress \
+  -Dtest=PrometheusEndpointIntegrationTests,LocalAccessTokenMaterialUnitTests test
+```
+
+A verificação completa das métricas automáticas e as métricas específicas de
+negócio continuam no terceiro item de A08 em [PENDING_ACTIONS.md](PENDING_ACTIONS.md).
 
 ## Documentação OpenAPI e Swagger UI
 
@@ -1574,6 +1670,7 @@ sem cookies de autenticação enviados automaticamente pelo navegador. CORS mant
 a integração padrão do Spring; nenhuma origem adicional é liberada nesta tarefa.
 
 As demais rotas exigem autenticação, incluindo Actuator sensível e Prometheus.
+Prometheus exige também o [escopo de monitoramento](#acesso-ao-prometheus).
 Swagger/OpenAPI e health/probes preservam o acesso público existente.
 No perfil `local`, o contrato de demonstração exige assinatura RS256, `iss`,
 `exp`, audience da API e `token_use=access`; valida `nbf` quando presente,
@@ -1589,7 +1686,8 @@ JWT em authorities com o prefixo `SCOPE_`: por exemplo,
 `scope="requests/read requests/write"` permite as três operações.
 Sem autenticação, a API responde `401`; com token válido sem o escopo exigido,
 responde `403` com Problem Details e desafio Bearer `insufficient_scope`.
-O token de demonstração local inclui os dois escopos na criação e na renovação.
+O token de consumidor da demonstração local inclui os dois escopos na criação
+e na renovação; `monitor-token` emite somente `monitoring/read` em outro arquivo.
 A integração com um emissor de produção requer validar seu contrato; emissor e
 cofre ainda não foram escolhidos.
 
@@ -1686,9 +1784,10 @@ No banco, examinar locks, transações longas, I/O e `wait_event` em
 Acrescentar duração por etapa, p95/p99 do provedor, erros/timeouts/retries por
 categoria e vazão/idade do backlog para distinguir espera de processamento.
 
-Essas são necessidades de coleta: Prometheus não está exposto na configuração
-atual, métricas de negócio e histogramas/percentis ainda precisam de configuração
-ou instrumentação, e logs JSON/tracing distribuído não estão habilitados.
+Essas são necessidades de coleta: o [Prometheus está exposto com acesso restrito](#acesso-ao-prometheus),
+mas a verificação completa das métricas automáticas, as métricas de negócio e os
+histogramas/percentis ainda precisam de configuração ou instrumentação.
+Logs JSON/tracing distribuído não estão habilitados.
 Se tracing for adicionado, usar `traceId` e spans de entrada, banco e worker/HTTP
 externo; `correlationId` sozinho não fornece esses tempos. Proteger o acesso
 operacional, usar tags de baixa cardinalidade e manter IDs apenas em logs/traces,
