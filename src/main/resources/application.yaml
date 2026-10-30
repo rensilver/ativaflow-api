@@ -32,6 +32,24 @@ server:
     include-binding-errors: never
     include-path: never
 
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health
+  endpoint:
+    health:
+      show-details: never
+      show-components: never
+      probes:
+        enabled: true
+      group:
+        liveness:
+          include: livenessState
+        readiness:
+          # Criar e consultar solicitações exige banco, mas não o provedor assíncrono.
+          include: readinessState,db
+
 app:
   http:
     max-body-bytes: ${API_MAX_BODY_BYTES:16384}

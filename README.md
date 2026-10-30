@@ -26,11 +26,11 @@ um resultado externo indeterminado permanece em `PROCESSING` e bloqueia reenvio.
 
 | Situação | Implementação, evidência ou limite |
 | --- | --- |
-| Implementado | API, validação e Problem Details; [limites de body/tráfego](#limites-de-body-e-tráfego); JWT/escopos/BOLA; unicidade global e repetição 201/200/409; worker, HTTP e persistência de resultados; Dockerfile e Compose. |
+| Implementado | API, validação e Problem Details; [limites de body/tráfego](#limites-de-body-e-tráfego); JWT/escopos/BOLA; unicidade global e repetição 201/200/409; worker, HTTP e persistência de resultados; Dockerfile e Compose; [probes de saúde](#probes-de-saúde). |
 | Cobertura automatizada existente | Testes de endpoints e concorrência com PostgreSQL/Testcontainers, autorização, cliente HTTP com WireMock, orquestração e recuperação. As suítes integradas de processamento e restart habilitam o scheduler explicitamente; as demais usam o padrão desligado do perfil `test`. Evidências em [Testes e integração contínua](#testes-e-integração-contínua). |
 | Demonstração documentada | [Roteiro completo](docs/container-image.md#demonstração-autenticada-e-retomada-de-pendências) de JWT, POST/GET, chamada ao mock e retomada de `PENDING` após recriação com volume persistente. A execução registrada em [A01](PENDING_ACTIONS.md#a01--empacotamento-e-execução-reproduzível) não substitui testes automatizados com scheduler ativo. |
 | Limitações da integração | Sem idempotência garantida pelo provedor, reconciliação automática ou renovação de lease. `429/503` são indeterminados por padrão; retry exige contrato explícito de não ativação. Timeouts continuam bloqueados para reconciliação. |
-| Próximas evoluções | Probes explícitas, Prometheus, métricas de negócio, logs JSON e tracing opcional. Detalhes e prioridades em [Ações pendentes](PENDING_ACTIONS.md). |
+| Próximas evoluções | Prometheus, métricas de negócio, logs JSON e tracing opcional. Detalhes e prioridades em [Ações pendentes](PENDING_ACTIONS.md). |
 
 ## Roteiro curto de uso
 
@@ -1478,6 +1478,58 @@ logs ou encerrar o ambiente:
 docker compose restart activation-provider-mock
 docker compose logs --tail=100 activation-provider-mock
 docker compose down
+```
+
+## Probes de saúde
+
+As probes estão habilitadas explicitamente em `application.yaml`, inclusive no
+perfil `local`, na mesma porta HTTP da API. Apenas o endpoint `health` está
+exposto pelo Actuator. Health e seus grupos permitem consultas sem JWT e ocultam
+componentes, detalhes do banco e exceções, inclusive para consumidores autenticados.
+
+| Caminho | Critério | Resposta em caso de falha |
+| --- | --- | --- |
+| `/actuator/health/liveness` | Estado interno `livenessState`, sem banco ou provedor. | HTTP 503, `DOWN`, se a aplicação estiver em `BROKEN`. |
+| `/actuator/health/readiness` | `readinessState` e conexão com PostgreSQL (`db`). | HTTP 503, `OUT_OF_SERVICE`, ao recusar tráfego; `DOWN` se o banco estiver indisponível. |
+| `/actuator/health` | Visão agregada dos indicadores registrados. | HTTP 503 se algum indicador estiver em `DOWN` ou `OUT_OF_SERVICE`. |
+
+O banco participa da readiness porque criação e consulta precisam de persistência.
+O provedor não participa: sua indisponibilidade afeta o processamento assíncrono,
+sem impedir a API de receber ou consultar solicitações. A liveness não verifica
+dependências externas, evitando reinícios motivados por falhas no banco ou provedor.
+Os grupos usam as funcionalidades nativas do
+[Actuator no Spring Boot 3.5](https://docs.spring.io/spring-boot/3.5/reference/actuator/endpoints.html#actuator.endpoints.kubernetes-probes).
+
+Com a aplicação iniciada conforme o [roteiro curto](#roteiro-curto-de-uso), execute:
+
+```bash
+curl --fail --silent --show-error http://localhost:8080/actuator/health/liveness
+curl --fail --silent --show-error http://localhost:8080/actuator/health/readiness
+```
+
+Ambas retornam HTTP 200 com `{"status":"UP"}` quando a aplicação aceita tráfego e
+o banco está acessível. Ajuste a porta se mudar `SERVER_PORT`. O healthcheck do
+Compose consulta a readiness; a espera inicial pelo mock via `depends_on` continua
+existindo, mas o check da API não o consulta. O Compose marca o container como
+`unhealthy` se o check falhar; isso não reinicia o container nem bloqueia sua porta
+automaticamente. Um futuro orquestrador deverá usar cada probe para sua finalidade.
+
+`/actuator/env`, `/actuator/configprops`, `/actuator/heapdump`, `/actuator/metrics`,
+`/actuator/info` e `/actuator/prometheus` continuam sem exposição HTTP. Sem JWT,
+a segurança responde 401; com autenticação válida, essas rotas respondem 404.
+A política de acesso ao Prometheus será definida no próximo item de A08.
+
+`HealthProbesIntegrationTests` carrega os perfis `local` e `test`, PostgreSQL real
+via Testcontainers e a cadeia de segurança da aplicação. Exercita os grupos,
+estados de disponibilidade e respostas sem detalhes com o provedor inacessível.
+A falha de banco é injetada apenas ao obter uma conexão; o indicador de banco e
+a agregação de saúde são reais. O perfil `test` desliga o worker e o rate limiter.
+As identidades autenticadas são simuladas; os testes de segurança existentes
+cobrem a validação criptográfica de JWT.
+Para executar essa classe:
+
+```bash
+./mvnw -B --no-transfer-progress -Dtest=HealthProbesIntegrationTests test
 ```
 
 ## Documentação OpenAPI e Swagger UI

@@ -51,7 +51,9 @@ import static org.assertj.core.api.Assertions.assertThat;
 @SpringBootTest(webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT,
 		classes = ApiRequestLimitsHttpTests.TestApplication.class,
 		properties = {"app.http.max-body-bytes=256", "app.http.rate-limit.requests=2",
-				"app.http.rate-limit.window=1m", "app.http.rate-limit.enabled=true"})
+				"app.http.rate-limit.window=1m", "app.http.rate-limit.enabled=true",
+				// This HTTP-only fixture deliberately excludes DataSourceAutoConfiguration.
+				"management.endpoint.health.group.readiness.include=readinessState"})
 class ApiRequestLimitsHttpTests {
 
 	private static final String PATH = "/api/v1/requests";

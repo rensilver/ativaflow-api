@@ -169,9 +169,11 @@ publicada; a API continua escutando em `8080` dentro do container. Ajuste a URL 
 curl se mudar essa variável. A API tem limite de memória de 512 MiB.
 
 A API aguarda os healthchecks do PostgreSQL (`pg_isready` via TCP) e do WireMock
-(`/__admin/health`). Seu próprio check consulta `/actuator/health`, que inclui a
-conexão com o banco, usando o curl já presente na imagem. O check da API não chama
-o provedor. A espera de inicialização usa `depends_on: condition: service_healthy`,
+(`/__admin/health`). Seu próprio check consulta `/actuator/health/readiness`, que
+inclui o estado de aceitação de tráfego e a conexão com o banco, usando o curl já
+presente na imagem. A [liveness](../README.md#probes-de-saúde) verifica somente o
+estado interno da aplicação. Nenhuma das duas probes chama o provedor. A espera
+de inicialização usa `depends_on: condition: service_healthy`,
 conforme a [referência do Compose](https://docs.docker.com/reference/compose-file/services/).
 
 O volume nomeado `postgres-data` preserva os dados entre recriações. Para parar
