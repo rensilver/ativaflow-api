@@ -1,14 +1,15 @@
 # ADR-0001 — Contrato dos metadados persistidos de processamento
 
-Data: 2026-10-29. Decisão: aceita para orientar a implementação do processamento.
+Data: 2026-10-29. Decisão: aceita e aplicada ao processamento implementado.
 
 ## Contexto e alcance
 
 A tabela `activation_requests` já contém os metadados internos na migração V2,
 mapeados por `model.ActivationRequest`. Esta decisão define sua semântica e o
-protocolo que o worker deverá cumprir. As operações implementadas de claim,
-preparação, resultado e recuperação e as etapas pendentes estão descritas ao final
-desta decisão. A persistência existente ainda não garante o protocolo completo de envio.
+protocolo cumprido pelo worker e pelos serviços de claim, preparação, resultado
+e recuperação. Scheduler, cliente HTTP e gravação dos resultados estão implementados;
+as evidências e limitações estão descritas ao final desta decisão. A proteção
+persistida impede reenvios ambíguos, mas não garante idempotência no provedor.
 
 Os estados públicos continuam `PENDING`, `PROCESSING`, `COMPLETED` e `FAILED`.
 Espera por retry e resultado indeterminado permanecem em `PROCESSING`. Os campos
@@ -76,8 +77,10 @@ Resultado indeterminado permanece em `PROCESSING`, mesmo na terceira tentativa.
 O backoff inicia em 1 s, dobra por tentativa e limita a base a 1 min, com jitter
 adicional de até 25%, configuráveis em `app.worker.retry`. O jitter não reduz a
 base; o atraso deve ter pelo menos 1 ms. `Retry-After` é recebido como `Instant`
-opcional e funciona como limite mínimo, sem reduzir o backoff. Sua interpretação
-e a classificação de respostas HTTP serão definidas na integração.
+opcional e funciona como limite mínimo, sem reduzir o backoff. O cliente HTTP
+classifica as respostas conforme a [ADR-0002](0002-contrato-minimo-provedor.md),
+mas não interpreta `Retry-After` nem produz `TransientFailure`: `429/503`
+permanecem indeterminados até haver garantia contratual de não ativação.
 
 ## Elegibilidade, posse e recuperação
 
@@ -97,8 +100,9 @@ após a preparação nunca torna a linha elegível para envio automático.
 Seleção e claim devem ser atômicos entre instâncias, por exemplo com
 `FOR UPDATE SKIP LOCKED` e atualização na mesma transação. O worker só prossegue
 se uma linha for efetivamente adquirida. Usar o relógio do banco para as
-comparações e atribuições de lease no SQL; duração e tamanho de lote serão
-configurações do worker. Não manter locks durante o HTTP.
+comparações e atribuições de lease no SQL. A duração é configurada por
+`app.worker.lease-duration`; o serviço interno de recuperação recebe o limite
+do lote como argumento. Não manter locks durante o HTTP.
 
 Toda preparação, renovação e gravação de resultado deve verificar `id`, status
 `PROCESSING`, `claimed_by`, versão esperada e lease ainda válido. Cada mutação
@@ -183,8 +187,9 @@ provedor. Portanto, resultado ambíguo permanece bloqueado para intervenção
 operacional, sem prazo de liberação automática. `external_id` único protege a
 criação local, mas não comprova idempotência do efeito externo. Expiração de
 lease, reinício, `Retry-After` e limite de tentativas não removem esse bloqueio.
-Uma futura integração HTTP deve registrar timeout de conexão/leitura e qualquer
-resposta sem certeza do efeito externo por essa operação, sem agendar retry.
+O cliente HTTP classifica timeout de conexão/leitura e respostas sem certeza do
+efeito externo como `Indeterminate`. O worker encaminha esse resultado pelo
+`ActivationRequestOutcomeHandler` a essa operação, sem agendar retry.
 
 `ActivationRequestLeaseRecoveryService.recoverExpiredLeases` libera somente posse
 vencida com reenvio comprovadamente seguro, em lotes, com CTE, `FOR UPDATE SKIP
@@ -228,7 +233,18 @@ vencimento exato do lease, liberação e commit independente em PostgreSQL real.
 Os testes unitários cobrem a política de atraso, sua configuração, validação dos
 códigos de erro e contagens de linhas inesperadas.
 
-HTTP real, renovação de lease e reconciliação continuam pendentes.
+`ActivationRequestWorker` está habilitado por padrão e usa `@Scheduled` para
+buscar trabalho persistido. `poll()` e `processNext()` suspendem transações
+chamadoras com `NOT_SUPPORTED`; claim e preparação confirmam suas transações
+antes da chamada a `HttpActivationProviderClient`. O handler encaminha sucesso,
+rejeição permanente, falha transitória segura e resultado indeterminado aos
+serviços correspondentes. O cliente atual não produz falha transitória segura.
+O claim retoma diretamente trabalho seguro com lease vencido; o serviço de
+recuperação explícita não possui scheduler próprio.
+
+Renovação de lease e reconciliação automática continuam pendentes. O lease não
+é estendido durante o HTTP: uma resposta após seu vencimento não pode ser gravada
+como resultado confirmado, e a proteção preventiva preserva a ambiguidade.
 As demais relações entre colunas não possuem enforcement completo
 no banco ou nos métodos da entidade. Os métodos atuais
 `startProcessing()`, `complete()` e `fail()` cuidam das transições básicas;
@@ -237,7 +253,14 @@ não implementam o protocolo de posse e envio desta decisão.
 Os testes existentes `FlywayMigrationTests`, `ActivationRequestPersistenceTests`,
 `ActivationRequestTests` e `ActivationRequestMapperTests` verificam schema,
 mapeamento, defaults, auditoria, lock otimista e isolamento dos campos públicos.
-Esses testes não comprovam o fluxo completo do worker. As próximas etapas
-deverão testar classificação de respostas, interpretação de `Retry-After`,
-timeout real e ausência de reenvio em resultado
-indeterminado no fluxo HTTP completo, com PostgreSQL real.
+Esses testes não comprovam o fluxo completo do worker.
+`HttpActivationProviderClientTests` e `HttpActivationProviderWireMockTests`
+cobrem a fronteira HTTP com WireMock, incluindo timeout de leitura real e
+classificação conservadora, inclusive na presença de `Retry-After`.
+`ActivationRequestWorkerTests` verifica a orquestração e a suspensão de transação
+com dependências simuladas. `ActivationRequestProviderRejectionTests` combina
+worker, cliente HTTP, WireMock e PostgreSQL para `400` e `503`, com scheduler
+desligado. Ainda falta reunir criação/commit, worker, HTTP real e GET para
+sucesso, `500` e timeout, além de testes de retomada com scheduler ativo,
+conforme [A04](../../PENDING_ACTIONS.md#a04--completar-a-evidência-do-processamento-integrado).
+A interpretação de `Retry-After` é uma evolução contratual distinta em A06.

@@ -1,13 +1,108 @@
 # AtivaFlow API
 
-Projeto Java 21 com Spring Boot 3.5.16, organizado em camadas para uma API REST.
-A base atual reúne dependências, configurações por ambiente, estrutura de pacotes,
-migrações, entidade JPA com transições de estado, auditoria e controle otimista,
-e DTOs públicos como records com Bean Validation na entrada, além da criação
-de solicitações por `POST /api/v1/requests` e consulta por `GET /api/v1/requests/{id}`.
-Os pacotes de aplicação possuem suas responsabilidades descritas em
-`package-info.java`; o cliente HTTP do provedor está implementado, e o worker
-que o acionará continua pendente.
+API REST Java 21 com Spring Boot 3.5.16 para receber solicitações de ativação de
+produtos, persistir o trabalho e consultar seu andamento. O POST confirma a
+criação sem aguardar o provedor; um worker com scheduler habilitado por padrão
+busca trabalho no PostgreSQL e chama o provedor via HTTP após o commit.
+A API oferece consulta individual e listagem paginada, autenticação JWT,
+escopos de leitura/escrita e isolamento por consumidor. Repetições idênticas
+reutilizam a solicitação; divergências retornam conflito.
+
+## Arquitetura e estado atual
+
+```mermaid
+flowchart LR
+    Consumer[Consumidor com JWT] -->|POST e GET| API[Controller e serviços]
+    API -->|Criação e consultas| DB[(PostgreSQL)]
+    Worker[Worker com scheduler] -->|Claim, preparação e resultado| DB
+    Worker -->|HTTP fora de transação| Client[ActivationProviderClient / RestClient]
+    Client -->|POST /provider/v1/activate| Provider[Provedor simulado WireMock]
+```
+
+O banco mantém o trabalho durável e coordena instâncias por claim, lease e versão.
+Cada etapa de escrita do worker confirma sua própria transação curta antes da
+seguinte. O estado público segue `PENDING → PROCESSING → COMPLETED` ou `FAILED`;
+um resultado externo indeterminado permanece em `PROCESSING` e bloqueia reenvio.
+
+| Situação | Implementação, evidência ou limite |
+| --- | --- |
+| Implementado | API, validação e Problem Details; JWT/escopos/BOLA; unicidade global e repetição 201/200/409; worker, HTTP e persistência de resultados; Dockerfile e Compose. |
+| Cobertura automatizada existente | Testes de endpoints e concorrência com PostgreSQL/Testcontainers, autorização, cliente HTTP com WireMock, orquestração e recuperação. O perfil `test` desliga o scheduler; as evidências específicas estão em [Testes e integração contínua](#testes-e-integração-contínua). |
+| Demonstração documentada | [Roteiro completo](docs/container-image.md#demonstração-autenticada-e-retomada-de-pendências) de JWT, POST/GET, chamada ao mock e retomada de `PENDING` após recriação com volume persistente. A execução registrada em [A01](PENDING_ACTIONS.md#a01--empacotamento-e-execução-reproduzível) não substitui testes automatizados com scheduler ativo. |
+| Limitações da integração | Sem idempotência garantida pelo provedor, reconciliação automática ou renovação de lease. `429/503` e timeouts são indeterminados; o cliente não habilita retry HTTP nem interpreta `Retry-After`. |
+| Próximas evoluções | Completar testes integrados de sucesso/500/timeout e retomada pelo scheduler; limites de body/tráfego; probes explícitas, Prometheus, métricas de negócio, logs JSON e tracing opcional. Detalhes e prioridades em [Ações pendentes](PENDING_ACTIONS.md). |
+
+## Roteiro curto de uso
+
+Execute na raiz do projeto em Bash com JDK 21, Docker Engine/Compose, curl e jq.
+As portas `8080` e `8081` devem estar livres. Os comandos usam o Compose completo;
+para PostgreSQL próprio e API na máquina, veja [Execução local](#execução-local).
+
+1. Copie `.env.example` para `.env` se ainda não existir e preencha `DB_PASSWORD`.
+   Mantenha `SERVER_PORT=8080` neste roteiro. O Compose lê `.env` automaticamente.
+2. Gere o JWT efêmero e disponibilize somente a chave pública ao container:
+
+   ```bash
+   export JWT_DEMO_DIR="$(java scripts/LocalJwt.java create)"
+   source "$JWT_DEMO_DIR/env.sh"
+   export JWT_PUBLIC_KEY_FILE="$PWD/.env.jwt-public.pem"
+   cp -- "$JWT_DEMO_DIR/public.pem" "$JWT_PUBLIC_KEY_FILE"
+   chmod 0444 "$JWT_PUBLIC_KEY_FILE"
+   docker compose config --quiet
+   docker compose up --build -d --wait
+   curl --fail http://localhost:8080/actuator/health
+   ```
+
+3. Após o build, renove o token de cinco minutos e envie a solicitação. O header
+   Bearer é lido do arquivo privado, sem copiar o token para o comando:
+
+   ```bash
+   java scripts/LocalJwt.java token "$JWT_DEMO_DIR"
+   export DEMO_EXTERNAL_ID="QUICKSTART-$(date -u +%Y%m%dT%H%M%SZ)-$RANDOM"
+   export DEMO_PAYLOAD="$(jq -nc --arg id "$DEMO_EXTERNAL_ID" \
+     '{externalId:$id,customerId:"CUST-001",productCode:"INTERNET-500"}')"
+   curl --fail-with-body --silent --show-error --dump-header "$JWT_DEMO_DIR/post.headers" \
+     --header "@$JWT_DEMO_DIR/authorization.header" \
+     --header 'Content-Type: application/json' --data "$DEMO_PAYLOAD" \
+     http://localhost:8080/api/v1/requests > "$JWT_DEMO_DIR/created.json"
+   cat "$JWT_DEMO_DIR/post.headers"
+   jq . "$JWT_DEMO_DIR/created.json"
+   export DEMO_REQUEST_ID="$(jq -er '.id' "$JWT_DEMO_DIR/created.json")"
+   ```
+
+   A criação retorna `201`, `Location` e a fotografia em `PENDING`. O token local
+   inclui `requests/write` para POST e `requests/read` para GET.
+4. Consulte o registro com o mesmo consumidor. Repita o GET até observar
+   `COMPLETED` com o mapping padrão `204` do mock; a primeira consulta pode
+   retornar `PENDING` ou `PROCESSING`:
+
+   ```bash
+   curl --fail-with-body --silent --show-error \
+     --header "@$JWT_DEMO_DIR/authorization.header" \
+     "http://localhost:8080/api/v1/requests/$DEMO_REQUEST_ID" | jq .
+   ```
+
+   Reenviar o mesmo payload com o mesmo token retorna `200` e o estado atual.
+   Alterar cliente/produto mantendo `externalId` retorna `409`. Sem token, `401`;
+   com token válido sem escopo, `403`; entrada inválida, `400`. Veja os exemplos
+   de [criação](#criação-de-solicitações), [erros](#tratamento-centralizado-de-erros)
+   e [renovação JWT](docs/local-jwt.md#verificar-a-api-e-renovar-o-token).
+5. Encerre os serviços e remova os arquivos gerados neste roteiro:
+
+   ```bash
+   docker compose down
+   rm -- "$JWT_PUBLIC_KEY_FILE"
+   rm -r -- "$JWT_DEMO_DIR"
+   unset JWT_DEMO_DIR JWT_PUBLIC_KEY_FILE DEMO_EXTERNAL_ID DEMO_PAYLOAD DEMO_REQUEST_ID
+   ```
+
+O volume do PostgreSQL permanece após `down`; mantenha a senha para reutilizá-lo.
+Para subir novamente, gere o material JWT e copie a nova chave pública antes de
+`up`. O [guia completo](docs/container-image.md#ambiente-completo-com-docker-compose)
+explica portas, configuração e confirmação no WireMock, shutdown/restart e
+retomada de pendências. O mock usa o contrato assumido na
+[ADR-0002](docs/adr/0002-contrato-minimo-provedor.md); um provedor real exige
+validação desse contrato, autenticação própria e estratégia de reconciliação.
 
 ## Tecnologias e dependências
 
@@ -110,8 +205,9 @@ Os nomes em `snake_case` correspondem aos campos `externalId`, `customerId`,
 `productCode`, `createdAt` e `updatedAt` do contrato da API. O limite adotado para
 os três identificadores textuais é de 100 caracteres. As datas representam
 instantes, compatíveis com `Instant` e exposição em UTC. O padrão de `updated_at`
-vale apenas para inserções; a aplicação deverá atualizá-lo a cada alteração,
-sem trigger no banco. A entidade aplica as transições de status descritas abaixo.
+vale apenas para inserções; a aplicação o atualiza por auditoria JPA ou
+explicitamente nas operações SQL do worker, sem trigger no banco. A entidade
+aplica as transições de status descritas abaixo.
 
 A migração `V2__add_activation_request_owner_and_processing_metadata.sql`
 adiciona os campos internos abaixo, preservando a V1 e o contrato público:
@@ -141,7 +237,7 @@ de resultado confirmado remove essa proteção na mesma atualização que conclu
 encerra em falha ou agenda um retry seguro. Assim, uma queda entre envio e gravação
 do resultado não libera um reenvio automático. Claim, preparação, persistência de
 resultados e liberação de leases vencidos estão implementados conforme as seções
-abaixo. A integração HTTP continua pendente.
+abaixo. O worker integra essas operações ao cliente HTTP já implementado.
 
 `consumer_id` é diferente de `customer_id`: o primeiro identifica o sistema
 consumidor autenticado; o segundo identifica o cliente informado no pedido.
@@ -153,21 +249,22 @@ ausente ou inválida resulta em `401` antes de acessar o banco. O proprietário 
 pode ser aceito do body. Os DTOs públicos aceitam apenas `externalId`,
 `customerId` e `productCode` na criação e expõem apenas `id`, `externalId`,
 `customerId`, `productCode`, `status`, `createdAt` e `updatedAt` nas respostas.
-Nenhuma das oito colunas internas deverá ser exposta na API.
+Nenhuma das colunas internas, incluindo `correlation_id`, é exposta no JSON público.
 
 O schema, a entidade JPA e os DTOs estão implementados e cobertos por testes.
-Scheduler, chamada HTTP e reconciliação ainda estão pendentes.
-O claim atribui leases e recupera somente trabalho comprovadamente seguro;
-a preparação registra a tentativa antes do HTTP e a recuperação libera a posse vencida.
+Scheduler e chamada HTTP estão implementados; reconciliação automática permanece
+pendente. O claim atribui leases e retoma somente trabalho comprovadamente seguro;
+a preparação registra a tentativa antes do HTTP. A recuperação explícita de leases
+está disponível como serviço interno, sem agendamento próprio.
 Os campos opcionais começam nulos; a sinalização de reconciliação
-permitirá manter um resultado ambíguo em
+mantém um resultado ambíguo em
 `PROCESSING`, sem adicionar estados públicos. Claim, preparação e gravação de
 resultado aplicam o limite configurado de até três tentativas totais; a constraint do banco impede somente contagens
 negativas. A unicidade de `external_id` continua global, inclusive entre
 consumidores. Os índices de listagem estão na V3; índices específicos para claim
 ainda não foram adicionados e dependerão da avaliação do plano e do volume de trabalho.
 
-`model.ActivationRequest` mapeia todas as colunas de V1/V2, com acesso JPA pelos
+`model.ActivationRequest` mapeia as colunas de V1/V2 e a correlação da V4, com acesso JPA pelos
 campos e construtor sem argumentos `protected`, compatível com o Hibernate.
 O código de aplicação usa `ActivationRequest.create(externalId, customerId,
 productCode, trustedConsumerId)`. A factory delega a um construtor privado,
@@ -185,7 +282,8 @@ estados terminais não podem ser reabertos. `fail` exige texto não vazio de at�
 100 caracteres para `last_error_code`; o chamador deve fornecer apenas um código
 categorizado, sem resposta bruta do provedor. Retry é registrado pelo serviço de
 resultados; reconciliação continua pendente. O claim usa SQL condicional no repositório, conforme
-descrito abaixo. Esta entidade ainda não implementa o protocolo de envio.
+descrito abaixo. O protocolo de envio é implementado pelo worker e pelos serviços,
+sem delegar a coordenação à entidade.
 
 `createdAt` e `updatedAt` usam `Instant`, com `@CreatedDate`, `@LastModifiedDate`
 e `AuditingEntityListener`. `JpaAuditingConfiguration` habilita a auditoria com
@@ -321,10 +419,14 @@ ou endpoint para liberar reenvios. No shutdown, deve-se deixar expirar a posse
 de uma tentativa autorizada sem apagar sua sinalização preventiva. Nenhuma dessas
 operações promete efeito externo exatamente uma vez.
 
-Os serviços são operações internas disponíveis para o futuro worker; esta etapa
-não adiciona scheduler, HTTP nem renovação de lease.
-Os métodos básicos da entidade (`complete()` e `fail()`) continuam sem implementar
-o protocolo de resultado e não devem ser usados diretamente pelo futuro worker.
+O `ActivationRequestWorker` usa claim, preparação e `ActivationRequestOutcomeHandler`
+para coordenar o envio e a gravação. Seu `poll()` usa `@Scheduled`, com intervalo
+configurável, e drena o trabalho elegível; `poll()` e `processNext()` usam
+`NOT_SUPPORTED` para suspender uma eventual transação chamadora.
+Não há renovação automática de lease: se ele vencer durante o HTTP, a gravação
+tardia é recusada e a proteção preventiva mantém o bloqueio.
+Os métodos básicos da entidade (`complete()` e `fail()`) não implementam o
+protocolo de resultado; o worker usa os serviços de atualização condicional.
 Os metadados continuam ausentes dos DTOs públicos, sem alteração dos quatro status.
 
 ## Resultados confirmados e agendamento de retries
@@ -373,7 +475,7 @@ preparação de tentativas e ao registro de falhas seguras. Resultados ambíguos
 continuam bloqueados para reconciliação, inclusive na última tentativa configurada.
 
 O PostgreSQL persiste `next_attempt_at = max(CURRENT_TIMESTAMP + atraso, retryAfter)`.
-`retryAfter` é um `Instant` opcional já interpretado pela futura integração HTTP;
+`retryAfter` é um `Instant` opcional fornecido pelo chamador do serviço;
 ausência ou data passada preserva o backoff positivo. Uma data futura posterior
 ao backoff é respeitada inclusive além do teto da base. O SQL também rejeita
 atrasos de retry menores que 1 ms. A data escolhida fica persistida: polling,
@@ -383,8 +485,10 @@ antecipam o agendamento. Não há espera com `Thread.sleep`.
 Retry seguro exige garantia de que a tentativa não ativou o produto. Código
 HTTP 500/503, timeout ou `Retry-After` isoladamente não fornecem essa garantia;
 sem ela, o chamador deve registrar resultado ambíguo e manter o bloqueio.
-A classificação de respostas e a interpretação do header continuam no escopo
-da futura integração HTTP. Nenhuma operação adiciona endpoint público.
+O cliente HTTP já classifica as respostas, mas não produz falha transitória segura
+nem interpreta `Retry-After`. Habilitar esse caminho requer garantia contratual
+explícita de não ativação, conforme a [matriz do provedor](#matriz-http--status--retry--justificativa).
+Nenhuma operação adiciona endpoint público.
 
 ## Contrato mínimo de integração com o provedor
 
@@ -408,7 +512,8 @@ Os construtores das variantes de falha rejeitam códigos nulos, em branco segund
 `String.isBlank()` ou maiores que 100 unidades UTF-16 com `IllegalArgumentException`.
 `TransientFailure` também rejeita `retryAfter` nulo: a ausência deve ser representada
 por `Optional.empty()`. Códigos válidos e a precisão do instante são preservados,
-sem normalização; a integração continua responsável por interpretar `Retry-After`.
+sem normalização. A interpretação de `Retry-After` não está implementada no
+cliente HTTP atual; o suporte a `Instant` não comprova essa funcionalidade.
 Cada chamada representa uma única tentativa, fora de transação de banco;
 persistência, limite de tentativas e agendamento continuam a cargo da aplicação.
 
@@ -822,8 +927,9 @@ curl -i -X POST http://localhost:8080/api/v1/requests \
   --data '{"externalId":"EXT-12345","customerId":"CUST-10001","productCode":"INTERNET-500"}'
 ```
 
-As regras de escopo ainda estão pendentes. A unicidade global de `externalId` continua
-garantida pela constraint do PostgreSQL.
+O POST exige `requests/write`; os GETs exigem `requests/read`. Token válido sem
+o escopo necessário retorna `403`, conforme a [matriz de autorização](docs/resource-server.md#matriz-de-autorização).
+A unicidade global de `externalId` é garantida pela constraint do PostgreSQL.
 
 Ao repetir o `POST` com o mesmo `externalId`, `customerId`, `productCode` e
 consumidor autenticado, a API responde `200 OK` com a representação atual do
@@ -918,7 +1024,7 @@ executá-la uma vez. No AtivaFlow, há duas fronteiras distintas:
 | Operação repetida | `POST /api/v1/requests` do consumidor para o AtivaFlow. | Chamada do AtivaFlow ao provedor para ativar o produto. |
 | Efeito protegido | Registro de uma única solicitação para o mesmo `externalId`. | Uma única ativação no provedor para a mesma operação lógica, mesmo com múltiplos envios. |
 | Garantia necessária | Constraint `UNIQUE (external_id)` e reutilização do registro quando consumidor, cliente e produto coincidem. | Contrato de idempotência implementado pelo provedor, com deduplicação ou operação naturalmente idempotente. |
-| Situação atual | Implementada na criação, inclusive para requisições concorrentes. | Integração ainda pendente; não há garantia de efeito externo exatamente uma vez. |
+| Situação atual | Implementada na criação, inclusive para requisições concorrentes. | HTTP e worker implementados; não há deduplicação externa contratada nem garantia de efeito externo exatamente uma vez. |
 
 Na API, a primeira criação retorna `201 Created`; uma repetição idêntica pelo
 mesmo consumidor retorna `200 OK`, com o mesmo ID e a representação atual,
@@ -934,7 +1040,7 @@ no provedor: ele pode concluir a ativação e a aplicação perder a resposta ou
 falhar antes de persistir `COMPLETED`. Claims, leases e controle de versão
 coordenam o processamento local, mas não eliminam essa janela de incerteza.
 
-Por exemplo, na futura integração:
+Por exemplo, no fluxo atual:
 
 1. O consumidor envia `EXT-12345`, e a API persiste a solicitação com `201`.
 2. O worker prepara a tentativa, chama o provedor, e o provedor ativa o produto.
@@ -1230,11 +1336,20 @@ curl -i --request POST 'http://localhost:8081/provider/v1/activate' \
   --data '{"externalId":"EXT-12345","customerId":"CUST-10001","productCode":"INTERNET-500"}'
 ```
 
-O retorno esperado é `204 No Content`, sem corpo. O único mapping padrão é
+O retorno esperado é `204 No Content`, sem corpo. Essa chamada direta verifica
+somente o mock: não cria solicitação na API nem grava estado no PostgreSQL.
+O único mapping padrão é
 `infra/wiremock/mappings/activation-success.json`; não há seletor de cenários na
 API. Erros e timeouts são configurados pelo próprio WireMock dos testes, em
 instâncias isoladas com portas dinâmicas, sem depender deste container.
-Com a API iniciada, o worker processa as solicitações persistidas e chama o mock.
+Com a API iniciada e `WORKER_ENABLED=true` (padrão), o worker processa as
+solicitações persistidas e chama o mock automaticamente. Para demonstrar esse
+fluxo, use o POST autenticado e consulte o GET do [roteiro curto](#roteiro-curto-de-uso).
+Não espere encontrar o GET em `PENDING`: o worker pode já ter concluído a ativação.
+Para inspecionar o estado inicial sem processamento, desabilite temporariamente
+o worker na execução na máquina; no Compose use o override documentado no
+[roteiro de retomada](docs/container-image.md#demonstração-autenticada-e-retomada-de-pendências),
+pois `WORKER_ENABLED` no `.env` não é encaminhado pelo YAML atual.
 
 Após editar um mapping, reinicie o serviço para recarregá-lo. Para consultar
 logs ou encerrar o ambiente:
@@ -1296,7 +1411,8 @@ JWT em authorities com o prefixo `SCOPE_`: por exemplo,
 Sem autenticação, a API responde `401`; com token válido sem o escopo exigido,
 responde `403` com Problem Details e desafio Bearer `insufficient_scope`.
 O token de demonstração local inclui os dois escopos na criação e na renovação.
-Os contratos de emissores externos dependem das próximas etapas.
+A integração com um emissor de produção requer validar seu contrato; emissor e
+cofre ainda não foram escolhidos.
 
 Veja [Configuração JWT e demonstração local](docs/resource-server.md) para variáveis
 de ambiente, JWKS, audience e geração de chave/token efêmeros fora do repositório.
@@ -1490,8 +1606,9 @@ imagem `postgres:17-alpine`, sem depender do banco ou das credenciais locais.
 servidor WireMock iniciado pelo próprio teste.
 `HttpActivationProviderClientTests` verifica o cliente real com WireMock em porta
 dinâmica: URL com prefixo, payload exato com Unicode e espaços, classificação de
-respostas, `Retry-After`, timeout de leitura, falha de conexão e ausência de retry
-ou redirecionamento automático. Também verifica rejeição de configuração inválida
+respostas, manutenção do bloqueio mesmo com `Retry-After`, timeout de leitura,
+falha de conexão e ausência de retry ou redirecionamento automático.
+Também verifica rejeição de configuração inválida
 na inicialização, sem exigir banco ou Compose.
 `HttpActivationProviderWireMockTests` testa isoladamente a fronteira HTTP do
 cliente, com WireMock em porta dinâmica e sem contexto Spring, banco, Docker ou
@@ -1515,7 +1632,8 @@ bash ./mvnw -B --no-transfer-progress \
 
 Essas quatro classes não iniciam contexto Spring, banco, servidor HTTP ou containers.
 O transporte simulado verifica uma única chamada e a classificação de `429/503`
-com `Retry-After` ausente, em segundos, data HTTP, inválido, negativo ou enorme.
+como indeterminados, sem interpretar `Retry-After` ausente, em segundos, data HTTP,
+inválido, negativo ou enorme.
 Exceções de timeout de conexão/leitura são injetadas, inclusive com causas aninhadas;
 o tempo real de expiração não é medido nesses testes unitários.
 Handler e serviços reais são exercitados com repositório simulado: resultados
@@ -1555,7 +1673,7 @@ Também verifica a rejeição individual dos campos controlados pelo servidor
 no payload de criação.
 `ActivationRequestMapperTests` usa `@JsonTest` com o mapper gerado e descoberto
 como bean Spring para verificar a conversão nos quatro estados, preservação
-dos valores e ausência dos oito metadados internos no JSON mesmo quando
+dos valores e ausência dos metadados internos no JSON mesmo quando
 preenchidos, além de entrada nula e datas anteriores à persistência, sem Docker.
 `ActivationRequestPersistenceTests` verifica o mapeamento completo
 contra as migrações no PostgreSQL, leitura dos quatro estados como texto,
@@ -1657,8 +1775,9 @@ tentativa nem a expiração do lease autorizam retry ou encerramento em `FAILED`
 Sem garantia documentada de idempotência ou consulta de reconciliação no provedor,
 a solicitação aguarda intervenção operacional; não há liberação automática.
 Se o worker perdeu a posse, a operação retorna `false` e mantém a proteção
-preventiva persistida antes do HTTP. O cliente HTTP e sua integração com essa
-operação continuam pendentes, conforme o [ADR-0001](docs/adr/0001-metadados-de-processamento.md).
+preventiva persistida antes do HTTP. O cliente HTTP retorna `Indeterminate`, e o worker usa
+`ActivationRequestOutcomeHandler` para encaminhar o resultado a essa operação,
+conforme o [ADR-0001](docs/adr/0001-metadados-de-processamento.md).
 `ActivationRequestAmbiguousOutcomeTests` verifica o bloqueio nas três tentativas,
 rejeição de escritas sem posse válida, resposta tardia após recuperação e commit
 independente no PostgreSQL real. A operação não expõe endpoint público.
@@ -1676,6 +1795,12 @@ serviços transacionais e PostgreSQL reais. Os cenários exigem `FAILED` na prim
 segunda e terceira tentativas, `PROVIDER_REJECTED` sem dados sensíveis, ausência de
 agendamento mesmo com `Retry-After` e nenhuma nova chamada por outro worker.
 A consulta pública deve mostrar `FAILED` sem expor a justificativa interna.
+O mesmo teste integrado verifica que HTTP `503` permanece em `PROCESSING`, exige
+reconciliação e não provoca nova chamada. O scheduler fica desligado nesse teste;
+o worker é invocado explicitamente. A cobertura conjunta com criação/commit,
+HTTP real e GET para sucesso, `500` e timeout, e a retomada automática com scheduler
+habilitado ainda precisam ser acrescentadas, conforme
+[A04](PENDING_ACTIONS.md#a04--completar-a-evidência-do-processamento-integrado).
 
 Também é possível executar a aplicação com o PostgreSQL do Testcontainers e o
 perfil `test` por meio de `TestAtivaflowApiApplication`:

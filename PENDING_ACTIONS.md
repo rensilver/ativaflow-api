@@ -1,6 +1,6 @@
 # Ações pendentes — AtivaFlow API
 
-Revisão de `CHECKLIST.md` confrontada com código, testes, configurações, README e SPECs. O checklist original foi preservado. As referências numéricas abaixo agrupam tarefas repetidas; um checkbox antigo, marcado ou vazio, não foi tratado como prova de implementação.
+Revisão de `CHECKLIST.md` confrontada com código, testes, configurações, README e SPECs. O checklist usado na revisão original não está disponível neste checkout; as referências numéricas abaixo preservam sua rastreabilidade e agrupam tarefas repetidas. Um checkbox antigo, marcado ou vazio, não foi tratado como prova de implementação.
 
 **Prioridades:** P0 = requisito obrigatório segundo as SPECs ou validação do fluxo principal; P1 = diferencial previsto no checklist; P2 = evolução apenas documental. O HTML original não está no repositório: a conferência do enunciado foi limitada às transcrições em `specs/`.
 
@@ -46,11 +46,13 @@ Revisão de `CHECKLIST.md` confrontada com código, testes, configurações, REA
 
 ### A03 — Corrigir documentação que contradiz o código
 
-- [ ] **[P0] Atualizar README e ADRs existentes.** Há afirmações de que worker, integração HTTP e escopos continuam pendentes, embora já existam. Exemplos: introdução do README, seção de criação, tabela de idempotência, seção do mock e final dos testes; introdução do ADR-0002 e trechos do ADR-0001. Revisar também as orientações de demonstração do mock para refletir o worker ativo.
-- [ ] **[P0] Consolidar um roteiro curto de uso.** Reaproveitar exemplos de API, erros e JWT existentes; acrescentar arquitetura simples e conectar configuração, inicialização, token, POST e GET em uma sequência reproduzível. Distinguir funcionalidades implementadas, evidências de teste, limitações e evoluções.
-- [ ] **[P1] Corrigir referências obsoletas do planejamento.** O POM e a SPEC-00 usam **Spring Boot 3.5.16**; o checklist ainda menciona 4.1.2 em 00.05, 00.09 e 05.01. As referências a `AGENTS.md` apontam para arquivo ausente; corrigir os textos conforme o processo real, sem criar esse arquivo apenas para satisfazer o plano.
+- [x] **[P0] Atualizar README e ADRs existentes.** Corrigidas as afirmações antigas sobre worker, integração HTTP e escopos; os documentos descrevem o scheduler ativo, as fronteiras transacionais, a classificação conservadora e as limitações reais. A demonstração distingue chamada direta ao mock de processamento pela API e explica o override necessário para desligar o worker no Compose.
+- [x] **[P0] Consolidar um roteiro curto de uso.** Incluídos arquitetura simples, quadro de implementação/evidências/limites/evoluções e [roteiro curto](README.md#roteiro-curto-de-uso) com configuração, inicialização, JWT, POST/GET e limpeza, reutilizando os contratos e guias existentes.
+- [x] **[P1] Corrigir referências obsoletas do planejamento.** Confirmado **Spring Boot 3.5.16** no POM, README e SPEC-00. A SPEC-07 usa os nomes reais dos dois ADRs e o processo com `specs/` e `PENDING_ACTIONS.md`, sem depender de arquivo de instruções ausente. `CHECKLIST.md` não existe neste checkout; suas referências históricas 00.05, 00.09 e 05.01 não puderam ser editadas e o arquivo não foi recriado.
 
 **Aceite:** README e ADRs descrevem o comportamento atual e seus limites de maneira consistente. Limitações reais, como ausência de reconciliação automática, continuam explícitas.
+
+**Validação documental (29/10/2026):** conferidos worker, handler, cliente HTTP, configuração de segurança, Compose, migrações e testes referenciados. Verificação automatizada dos cinco documentos alterados: 40 links locais/âncoras válidos, 30 blocos Bash aprovados por `bash -n`, fences balanceados e 35 referências a classes de teste existentes; versão 3.5.16 consistente com POM e SPEC-00. `git diff --check` sem erros. Alterações somente em Markdown; suíte Maven e demonstração completa não executadas nesta tarefa. A tentativa adicional de executar geração JWT foi impedida pela proteção contra Git ao detectar `.git` de infraestrutura em `/tmp`; o Docker via Snap também recusou iniciar no sandbox. Não há nova evidência de execução do roteiro ou do Compose; permanece a validação anterior de A01.
 
 **Origem:** 00.05, 00.09, 05.01, 07.08–07.14, 07.19, 07.24, FINAL.04. Os contratos, a matriz do provedor e os guias JWT já existem; precisam de consolidação e correção, não de reescrita integral.
 
@@ -143,7 +145,7 @@ Esta tabela explica o que foi retirado da lista de desenvolvimento pendente. Ela
 | --- | --- | --- |
 | 04.19; 05.03, 05.05 | `ApiExceptionHandlerUnitTests`, `SafeErrorResponsesUnitTests`, `ErrorDisclosureProtectionUnitTests` e testes dos endpoints | 400/404/409/500 e proteção contra divulgação já cobertos. |
 | 04.20; 05.17–05.18 | Testes em `src/test/java/com/rensilver/ativaflow_api/security/`, incluindo JWT realmente assinado, escopos, BOLA e contratos MVC | Não falta implementar novamente autenticação/autorização; corrigir a fixture que falha em A00. |
-| 05.01–05.02 | `pom.xml`, `model/ActivationRequestTests`, testes da política e dos serviços | Ferramentas e testes unitários de domínio já existem; referência a Boot 4.1.2 é obsoleta. |
+| 05.01–05.02 | `pom.xml`, `model/ActivationRequestTests`, testes da política e dos serviços | Ferramentas e testes unitários de domínio já existem; a versão adotada é Spring Boot 3.5.16. |
 | 05.04 | `ListActivationRequestsEndpointTests`, `ActivationRequestQueryTests` | Filtros, paginação, ordem e isolamento já cobertos. |
 | 05.06–05.09 | `TestcontainersConfiguration`, `FlywayMigrationTests`, `CreateActivationRequestEndpointTests`, testes de persistência/claim | PostgreSQL real, migrações, duplicidade, corrida, versão e claim já cobertos. |
 | Parte de 05.10–05.16 | Testes de lease/attempt/outcome, WireMock do cliente, testes do worker e `ActivationRequestProviderRejectionTests` | Base de processamento e testes já existe; complementar apenas A04/A06. |

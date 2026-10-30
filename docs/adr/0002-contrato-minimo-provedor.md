@@ -1,6 +1,6 @@
 # ADR-0002 — Contrato mínimo de ativação no provedor
 
-Data: 2026-10-29. Decisão: aceita para orientar a futura integração e o mock.
+Data: 2026-10-29. Decisão: aceita e aplicada à integração HTTP e ao mock.
 
 ## Contexto e alcance
 
@@ -10,9 +10,12 @@ Os campos JSON, o retorno `204` e a ausência de ativação nos cenários de err
 do mock abaixo são **suposições do projeto confirmadas com o responsável**.
 Não representam garantias de um provedor real.
 
-Esta decisão define o protocolo da chamada de saída do AtivaFlow. A implementação
-do cliente HTTP, dos DTOs de integração, dos mappings WireMock e do worker continua
-pendente. Os endpoints públicos e o schema do banco não mudam.
+Esta decisão define o protocolo da chamada de saída do AtivaFlow, implementado
+por `HttpActivationProviderClient`, `ActivationProviderRequest` e
+`ActivationRequestWorker`. O mapping padrão do WireMock retorna `204`.
+O worker prepara a tentativa após o commit da criação, chama o cliente fora de
+transação e persiste o resultado por serviços transacionais. Os contratos públicos
+e os quatro estados da API são preservados.
 
 ## Requisição
 
@@ -56,12 +59,12 @@ segundo `String.isBlank()`, com até 100 unidades UTF-16 por campo. Esse limite
 é uma decisão local de validação/persistência, não um requisito conhecido do
 provedor. Não presumir formato de documento, catálogo de produtos ou regex adicional.
 
-Os DTOs futuros pertencem a `client.provider.dto`, separados dos DTOs públicos.
+O DTO `ActivationProviderRequest` pertence a `client.provider.dto`, separado dos DTOs públicos.
 Não enviar `id`, `consumerId`, status, datas, versão, tentativas ou demais metadados
 internos. Não encaminhar o JWT do consumidor ao provedor. Não exigir `Accept`
 específico, pois nenhum schema de resposta é contratado.
 
-Exemplo para um mock local **quando ele estiver implementado e iniciado**:
+Exemplo para o mock local iniciado conforme o [README](../../README.md#provedor-simulado-no-compose):
 
 ```bash
 curl -i --request POST 'http://localhost:8081/provider/v1/activate' \
@@ -91,7 +94,7 @@ da classificação. Não persistir nem registrar a resposta bruta.
 A referência genérica a sucesso `2xx` na SPEC-03 fica concretizada aqui por
 `200`, `201` e `204`. `202` exige tratamento separado porque indica processamento
 ainda não concluído ([RFC 9110, seção 15.3.3](https://www.rfc-editor.org/rfc/rfc9110.html#section-15.3.3)).
-O mock padrão deverá usar `204`. Nenhum endpoint de consulta externa ou callback
+O mock padrão usa `204`. Nenhum endpoint de consulta externa ou callback
 é presumido para resolver `202` ou timeout.
 
 A garantia de não ativação que o mock pode simular em `429/503` não é inferida
@@ -127,7 +130,7 @@ em transação curta, condicionada à posse e versão da tentativa. Resultado am
 permanece protegido para reconciliação/intervenção operacional. Vencimento do
 lease e esgotamento de tentativas não autorizam reenvio nem falha terminal presumida.
 
-## Limitações e validação futura
+## Evidências existentes e limitações
 
 `externalId` não é uma chave de idempotência garantida pelo provedor. Não enviar
 `Idempotency-Key` nem prometer efeito externo exatamente uma vez sem suporte
@@ -141,10 +144,21 @@ semântica de sucesso, não ativação em erros, idempotência e reconciliação
 Alternativas descartadas nesta etapa: inventar JSON de resposta, reutilizar DTO
 público como contrato externo e tratar qualquer erro HTTP como autorização de retry.
 
-Na implementação, verificar com WireMock iniciado pelos próprios testes: método,
-caminho, headers e os três campos exatos; sucesso sem corpo; erros com e sem corpo;
-`202`; `500/503` e demais respostas sem garantia contratual indeterminadas;
-formatos de `Retry-After`;
-timeouts e ausência de retries cegos. Verificar com persistência real o limite de
-três tentativas e a preservação de resultados indeterminados. Esses cenários são
-critérios futuros, não testes já entregues nesta decisão.
+`HttpActivationProviderClientTests` e `HttpActivationProviderWireMockTests`
+iniciam WireMock isolado e cobrem payload, sucesso `200/201/204`, rejeição `400`,
+respostas indeterminadas, timeout de leitura e ausência de reenvio automático.
+`HttpActivationProviderCorrelationTests` verifica propagação da correlação e
+ausência do JWT na saída com transporte simulado. Os testes de `429/503` com
+`Retry-After` comprovam que o header não libera retry; não demonstram sua interpretação.
+`ActivationRequestProviderRejectionTests` combina worker, HTTP real, WireMock e
+PostgreSQL para `400/503`, sem scheduler. Os testes de persistência de resultados
+e ambiguidade verificam o limite de tentativas e o bloqueio de reenvio no banco.
+
+A cobertura conjunta de criação/commit → worker → HTTP → estado persistido/GET
+para sucesso, `500` e timeout, e a retomada com scheduler habilitado continuam em
+[A04](../../PENDING_ACTIONS.md#a04--completar-a-evidência-do-processamento-integrado).
+O cliente atual não interpreta `Retry-After` em segundos/data HTTP nem produz
+`TransientFailure`; esse diferencial depende de contrato seguro e implementação
+em [A06](../../PENDING_ACTIONS.md#a06--retry-http-seguro-e-retry-after).
+Não há operação automática de reconciliação nem teste que possa comprovar
+idempotência de um provedor real sem contrato correspondente.
