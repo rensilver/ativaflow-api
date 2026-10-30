@@ -1,4 +1,4 @@
-package com.rensilver.ativaflow_api;
+package com.rensilver.ativaflow_api.service;
 
 import java.time.Instant;
 import java.time.OffsetDateTime;
@@ -10,10 +10,10 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 
+import com.rensilver.ativaflow_api.support.TestcontainersConfiguration;
 import com.rensilver.ativaflow_api.config.JpaAuditingConfiguration;
 import com.rensilver.ativaflow_api.model.ActivationRequest;
 import com.rensilver.ativaflow_api.repository.ActivationRequestRepository;
-import com.rensilver.ativaflow_api.service.ActivationRequestClaimService;
 import com.rensilver.ativaflow_api.service.model.ClaimedActivationRequest;
 import jakarta.persistence.EntityManagerFactory;
 import jakarta.persistence.OptimisticLockException;

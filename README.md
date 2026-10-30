@@ -192,12 +192,18 @@ No cenário proposto, a latência da API passa de **300 ms para 2,5 s**, algumas
 consultas de **50 ms para 1,2 s** e o provedor de **400 ms para 3 s**, com CPU em
 **45%** e memória em **60%**. São dados do enunciado, não medições deste projeto.
 
-1. **O que investigar primeiro?** Primeiro, verificaria quando a lentidão começou, quais operações foram afetadas e se houve alguma mudança recente na aplicação ou no volume de requisições. Em seguida, analisaria os tempos de resposta e possíveis pontos de espera, já que o uso de CPU e memória não indica, por si só, uma sobrecarga.
-2. **Como separar aplicação, banco e provedor?** Analisaria separadamente o tempo gasto em cada etapa, desde o recebimento da requisição até as consultas ao banco e a comunicação com o provedor. Como a integração externa ocorre de forma assíncrona, sua lentidão não deveria afetar diretamente o tempo de resposta da criação da solicitação.
-3. **Quais logs e métricas ajudam?** Utilizaria os logs com identificadores de correlação para acompanhar o processamento das solicitações. Também observaria os tempos de resposta da API, das consultas ao banco e do provedor, além da quantidade de erros, conexões disponíveis e solicitações aguardando processamento.
-4. **Quais melhorias considerar?** As melhorias dependeriam da causa identificada. Poderia otimizar consultas e índices do banco, ajustar a quantidade de processamentos simultâneos ou revisar os limites de tempo da integração externa, sempre evitando alterações que comprometam a consistência das solicitações.
-5. **Qual hipótese relaciona os sintomas?** Sim. Uma possibilidade seria a lentidão do provedor provocar acúmulo de solicitações, aumentando a carga sobre recursos compartilhados com a API e o banco. Para confirmar essa hipótese, compararia os horários em que os problemas começaram e realizaria testes simulando a lentidão do provedor.
-6. **Como validar e reverter?** Compararia as métricas anteriores com os resultados após a correção, observando tempos de resposta, erros e quantidade de solicitações pendentes. Também acompanharia o comportamento da aplicação sob carga para garantir que a melhoria fosse consistente, mantendo a possibilidade de reverter a alteração caso surgissem novos problemas.
+1. **O que investigar primeiro?** 
+Primeiro, verificaria quando a lentidão começou, quais operações foram afetadas e se houve alguma mudança recente na aplicação ou no volume de requisições. Em seguida, analisaria os tempos de resposta e possíveis pontos de espera, já que o uso de CPU e memória não indica, por si só, uma sobrecarga.
+2. **Como separar aplicação, banco e provedor?** 
+Analisaria separadamente o tempo gasto em cada etapa, desde o recebimento da requisição até as consultas ao banco e a comunicação com o provedor. Como a integração externa ocorre de forma assíncrona, sua lentidão não deveria afetar diretamente o tempo de resposta da criação da solicitação.
+3. **Quais logs e métricas ajudam?** 
+Utilizaria os logs com identificadores de correlação para acompanhar o processamento das solicitações. Também observaria os tempos de resposta da API, das consultas ao banco e do provedor, além da quantidade de erros, conexões disponíveis e solicitações aguardando processamento.
+4. **Quais melhorias considerar?** 
+As melhorias dependeriam da causa identificada. Poderia otimizar consultas e índices do banco, ajustar a quantidade de processamentos simultâneos ou revisar os limites de tempo da integração externa, sempre evitando alterações que comprometam a consistência das solicitações.
+5. **Qual hipótese relaciona os sintomas?** 
+Sim. Uma possibilidade seria a lentidão do provedor provocar acúmulo de solicitações, aumentando a carga sobre recursos compartilhados com a API e o banco. Para confirmar essa hipótese, compararia os horários em que os problemas começaram e realizaria testes simulando a lentidão do provedor.
+6. **Como validar e reverter?** 
+Compararia as métricas anteriores com os resultados após a correção, observando tempos de resposta, erros e quantidade de solicitações pendentes. Também acompanharia o comportamento da aplicação sob carga para garantir que a melhoria fosse consistente, mantendo a possibilidade de reverter a alteração caso surgissem novos problemas.
 
 ## Produção
 

@@ -1,4 +1,4 @@
-package com.rensilver.ativaflow_api.client.provider;
+package com.rensilver.ativaflow_api.architecture;
 
 import com.tngtech.archunit.core.importer.ClassFileImporter;
 import com.tngtech.archunit.core.importer.ImportOption;

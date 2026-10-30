@@ -1,4 +1,4 @@
-package com.rensilver.ativaflow_api;
+package com.rensilver.ativaflow_api.observability;
 
 import java.time.Duration;
 import java.util.UUID;
@@ -6,6 +6,7 @@ import java.util.concurrent.TimeUnit;
 
 import com.github.tomakehurst.wiremock.junit5.WireMockExtension;
 import com.github.tomakehurst.wiremock.http.Fault;
+import com.rensilver.ativaflow_api.support.TestcontainersConfiguration;
 import com.rensilver.ativaflow_api.client.provider.ActivationProviderClient;
 import com.rensilver.ativaflow_api.client.provider.dto.ActivationProviderRequest;
 import com.rensilver.ativaflow_api.model.ActivationRequest;

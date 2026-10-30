@@ -1,4 +1,4 @@
-package com.rensilver.ativaflow_api;
+package com.rensilver.ativaflow_api.security;
 
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
@@ -10,9 +10,6 @@ import com.rensilver.ativaflow_api.config.OpenApiConfiguration;
 import com.rensilver.ativaflow_api.controller.ActivationRequestController;
 import com.rensilver.ativaflow_api.dto.response.ActivationRequestPageResponse;
 import com.rensilver.ativaflow_api.http.HttpLimitConfiguration;
-import com.rensilver.ativaflow_api.security.LocalJwtDecoderConfiguration;
-import com.rensilver.ativaflow_api.security.SecurityConfiguration;
-import com.rensilver.ativaflow_api.security.SecurityProblemHandler;
 import com.rensilver.ativaflow_api.service.ActivationRequestService;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;

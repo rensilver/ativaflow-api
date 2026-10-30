@@ -1,4 +1,4 @@
-package com.rensilver.ativaflow_api;
+package com.rensilver.ativaflow_api.controller;
 
 import java.time.Clock;
 import java.time.Instant;
@@ -17,7 +17,7 @@ import java.util.stream.Stream;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import com.github.tomakehurst.wiremock.junit5.WireMockExtension;
-import com.rensilver.ativaflow_api.controller.ActivationRequestController;
+import com.rensilver.ativaflow_api.support.TestcontainersConfiguration;
 import com.rensilver.ativaflow_api.domain.ActivationStatus;
 import com.rensilver.ativaflow_api.dto.response.ActivationRequestResponse;
 import org.junit.jupiter.api.AfterEach;

@@ -1,13 +1,13 @@
-package com.rensilver.ativaflow_api;
+package com.rensilver.ativaflow_api.observability;
 
 import java.time.Instant;
 import java.util.UUID;
 
+import com.rensilver.ativaflow_api.support.TestcontainersConfiguration;
 import com.rensilver.ativaflow_api.config.JpaAuditingConfiguration;
 import com.rensilver.ativaflow_api.dto.request.CreateActivationRequest;
 import com.rensilver.ativaflow_api.exception.ActivationRequestConflictException;
 import com.rensilver.ativaflow_api.mapper.ActivationRequestMapper;
-import com.rensilver.ativaflow_api.observability.CorrelationId;
 import com.rensilver.ativaflow_api.repository.ActivationRequestRepository;
 import com.rensilver.ativaflow_api.service.ActivationRequestAttemptService;
 import com.rensilver.ativaflow_api.service.ActivationRequestClaimService;
