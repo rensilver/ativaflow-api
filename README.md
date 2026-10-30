@@ -1996,6 +1996,21 @@ MAVEN_OPTS='-Xmx256m -XX:MaxMetaspaceSize=192m' \
 
 Esses limites são das JVMs; o PostgreSQL do Testcontainers também consome RAM.
 
+`LayerArchitectureTests` usa ArchUnit sobre as classes de produção, incluindo
+subpacotes e sem importar classes de teste. As regras impedem dependências diretas
+de controllers em repositories e limitam `domain` ao Java e ao próprio domínio.
+As entidades de `model` não podem depender dos componentes de aplicação e
+infraestrutura; seus mapeamentos JPA e anotações de auditoria continuam permitidos.
+Essas regras complementam o isolamento do contrato do provedor em
+`ActivationProviderClientArchitectureTests` e a separação do fluxo de criação em
+`AsyncProviderFailureIsolationUnitTests`. Para executar as novas regras e a regra
+do contrato do provedor, sem Spring Boot, banco ou Docker:
+
+```bash
+./mvnw -B --no-transfer-progress \
+  -Dtest=LayerArchitectureTests,ActivationProviderClientArchitectureTests test
+```
+
 O teste `AtivaflowApiApplicationTests` verifica a inicialização do contexto com o
 perfil `test`, o acesso anônimo ao Swagger UI e seus recursos, os documentos
 OpenAPI, os metadados da API e a preservação das regras de acesso às demais rotas

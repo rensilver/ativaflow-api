@@ -144,9 +144,15 @@ Estes itens não devem ser confundidos com ausência do núcleo funcional. Se al
 
 ### A11 — Completar regras ArchUnit
 
-- [ ] **[P1] Acrescentar as regras restantes previstas na SPEC-05**, especialmente Controller sem dependência de Repository e domínio sem dependência de infraestrutura, respeitando as camadas existentes.
+- [x] **[P1] Acrescentar as regras restantes previstas na SPEC-05.** `LayerArchitectureTests` impede dependências diretas de `controller` em `repository` e nas interfaces de repositório Spring Data; restringe `domain` (incluindo exceções e tipos internos) ao Java e ao próprio domínio; impede dependências de `model` nos componentes de aplicação e infraestrutura, preservando os mapeamentos JPA e a auditoria existentes. Importação restrita às classes de produção, incluindo subpacotes, sem contexto Spring.
 
-**Evidência:** `ActivationProviderClientArchitectureTests` já protege o contrato do provedor; `AsyncProviderFailureIsolationUnitTests` já proíbe dependência de criação/erros em provedor/worker. Portanto, 05.19 está parcial, não ausente.
+**Cobertura complementar:** `ActivationProviderClientArchitectureTests` continua protegendo o contrato do provedor; `AsyncProviderFailureIsolationUnitTests` continua proibindo dependência de criação/erros em provedor/worker. Estratégia e comando direcionado documentados no README, sem reorganizar as camadas ou alterar código de produção.
+
+**Validação direcionada (30/10/2026):** build limpo das duas classes de arquitetura passou com 4 testes. Inseridas temporariamente classes de produção em subpacotes com dependências proibidas (`controller` → repository, `domain` → RestClient/repository e `model` → service): as três regras novas falharam nas referências esperadas, com 3 falhas e 0 erros. Classes temporárias removidas antes da validação final. A primeira tentativa sem `clean` encontrou bytecode preexistente em `target` com assinaturas incompatíveis com os fontes; a recompilação limpa resolveu a inconsistência sem mudança nos fontes da aplicação.
+
+**Ajuste do ambiente de testes:** a primeira suíte completa executou 1.076 testes, com uma falha em `LocalJwtMaterialUnitTests.publishesOnlyPublicJwksMatchingTokenKidAndSignature`: a proteção do utilitário detectou `.git` de infraestrutura em `/tmp` e recusou gerar material JWT. A classe isolada passou com seus 5 testes ao usar `-Djunit.jupiter.tempdir.basedir=/var/tmp`, fora de Git. Nenhuma proteção ou teste foi removido; o diretório de infraestrutura foi preservado.
+
+**Validação completa (30/10/2026):** `./mvnw -B --no-transfer-progress clean verify`, com os limites de memória documentados no README e `-Djunit.jupiter.tempdir.basedir=/var/tmp`, terminou com `BUILD SUCCESS`: 1.076 testes em 74 relatórios XML conferidos, 0 falhas, 0 erros e 0 ignorados, incluindo integração com PostgreSQL via Testcontainers. Confirmada a ausência das classes temporárias nos fontes e em `target`. Bloco Bash do README validado com `bash -n`, fences Markdown balanceados e `git diff --check` sem erros.
 
 ### A12 — Completar e comprovar CI
 
