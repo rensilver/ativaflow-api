@@ -143,9 +143,11 @@ Estes itens não devem ser confundidos com ausência do núcleo funcional. Se al
 
 ### A13 — Decisões e evoluções documentais restantes
 
-- [ ] **[P1] Completar decisões reais nos ADRs existentes:** processamento assíncrono, duplicidade/idempotência e uso do WireMock já têm material distribuído entre README e dois ADRs. Consolidar contexto, alternativas e consequências; acrescentar a justificativa para não usar Circuit Breaker. Preservar a numeração e os links existentes, sem criar quatro documentos redundantes apenas para copiar os nomes do checklist.
+- [x] **[P1] Completar decisões reais nos ADRs existentes:** ADR-0001 consolidada com processamento assíncrono persistido e duplicidade/idempotência local; ADR-0002 com uso do WireMock e justificativa para não usar Circuit Breaker. As quatro decisões registram contexto, alternativas e consequências, incluindo limites e condições de revisão. Numeração e links preservados, com atalhos no README e sem novos ADRs redundantes.
 - [ ] **[P1] Acrescentar seção “Uso de IA”**, descrevendo somente ferramentas e atividades efetivamente utilizadas; não alegar revisão humana já realizada sem confirmação.
 - [ ] **[P2] Acrescentar seção curta de evolução operacional:** escala horizontal com constraint/claim/lease, configuração e segredos, eventos com Transactional Outbox e futuro fluxo imagem → registry → deploy/rollback/monitoramento. Reaproveitar `docs/resource-server.md` para origem/rotação de segredos. Sem necessidade de implementar cloud, broker ou CD.
+
+**Validação das decisões (29/10/2026):** conteúdo confrontado com criação/transações, constraint global, claim/preparação, worker, cliente HTTP, configuração de retry, Compose e cenários WireMock; conferidas as referências às suítes existentes. Verificação documental automatizada dos quatro Markdown alterados: 62 links locais/âncoras válidos, 37 blocos Bash aprovados por `bash -n`, 7 blocos JSON válidos e 46 classes de teste referenciadas existentes. As quatro decisões possuem contexto, decisão, alternativas, consequências e rastreabilidade; títulos/âncoras anteriores e os dois nomes de ADR foram preservados. Somente o primeiro item de A13 foi concluído. Busca por padrões de credenciais no texto acrescentado e `git diff --check` sem ocorrências/erros. Alterações somente documentais; suíte Maven, containers e CI remota não executados nesta tarefa.
 
 **Origem:** 06.29–06.32, 07.17–07.18, 07.20–07.24. O histórico já contém commits por assunto; 07.25 é uma prática a manter, não funcionalidade pendente nem motivo para reescrever o histórico.
 

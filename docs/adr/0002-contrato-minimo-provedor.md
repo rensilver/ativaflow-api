@@ -18,6 +18,44 @@ O worker prepara a tentativa após o commit da criação, chama o cliente fora d
 transação e persiste o resultado por serviços transacionais. Os contratos públicos
 e os quatro estados da API são preservados.
 
+## Decisão de usar WireMock
+
+**Contexto:** não há um provedor real disponível nem schema oficial completo.
+A demonstração local e os testes precisam exercitar a fronteira HTTP com
+respostas e atrasos controlados, sem transformar suposições em garantias externas.
+
+**Decisão:** usar WireMock como provedor simulado. O Compose executa a imagem
+`wiremock/wiremock`, com o mapping estático de sucesso
+[activation-success.json](../../infra/wiremock/mappings/activation-success.json)
+retornando `204`. Os testes HTTP iniciam seu próprio WireMock em porta dinâmica,
+com cenários definidos por teste; não dependem do Compose. O cenário opcional
+de retry fica em `scenarios/`, fora dos mappings padrão, e só é carregado
+explicitamente. O worker usa a porta `ActivationProviderClient`, cujo contrato
+independe do transporte. A implementação HTTP usa `RestClient` e URL configurável, sem selecionar
+comportamento por detectar o mock ou a URL de localhost.
+
+**Alternativas consideradas:**
+
+| Alternativa | Motivo para não adotar nesta etapa |
+| --- | --- |
+| Criar outro microsserviço Spring Boot ou endpoint artificial de cenário | Acrescenta código e manutenção para reproduzir funções já atendidas pelo WireMock. |
+| Simular somente a interface Java | É útil nos testes unitários, mas não verifica serialização, headers, status ou timeout sobre HTTP real. |
+| Compartilhar o mock do Compose entre os testes | Introduz dependência de serviço previamente iniciado e estado compartilhado entre cenários. |
+| Depender de um provedor real | Impede controlar falhas e atrasos de forma isolada; seu contrato e ambiente ainda não foram fornecidos. |
+
+**Consequências:** a mesma integração HTTP atende demonstração e testes isolados,
+com um único sucesso padrão, sem mappings de erro conflitantes. O Compose
+publica a porta do mock somente em loopback; sua API administrativa permite
+alterar cenários e não deve ser exposta publicamente. WireMock comprova o
+comportamento do cliente diante das respostas simuladas, sem validar autenticação,
+idempotência, capacidade ou semântica de um provedor real. Antes de mudar o
+destino, é necessário confirmar o contrato descrito nesta decisão.
+
+Rastreabilidade: [SPEC-03](../../specs/03-integracao-provedor.md),
+[Compose](../../docker-compose.yaml),
+[demonstração no README](../../README.md#provedor-simulado-no-compose),
+`HttpActivationProviderWireMockTests` e `ActivationRequestHttpRetryTests`.
+
 ## Requisição
 
 | Item | Contrato adotado |
@@ -152,6 +190,44 @@ preparação antes do HTTP, chamar fora de transação de banco e persistir o re
 em transação curta, condicionada à posse e versão da tentativa. Resultado ambíguo
 permanece protegido para reconciliação/intervenção operacional. Vencimento do
 lease e esgotamento de tentativas não autorizam reenvio nem falha terminal presumida.
+
+## Decisão de não usar Circuit Breaker
+
+**Contexto:** o provedor pode ficar lento ou indisponível. Conforme a
+[SPEC-03](../../specs/03-integracao-provedor.md), o escopo atual usa processamento
+assíncrono, timeouts configuráveis e até três tentativas totais apenas quando
+há garantia de não ativação. A criação não aguarda o HTTP e a chamada não mantém
+transação de banco aberta.
+
+**Decisão:** manter a integração sem Circuit Breaker nesta etapa. Timeouts
+limitam a espera da chamada, enquanto backoff, jitter e `Retry-After` regulam
+retries seguros por solicitação. Resultado ambíguo permanece bloqueado para
+reconciliação. Esses mecanismos atendem o escopo atual, mas não equivalem a um
+bloqueio global de chamadas durante uma indisponibilidade prolongada.
+
+**Alternativas consideradas:** adicionar Circuit Breaker agora permitiria
+suspender chamadas e testar a recuperação do provedor, porém exigiria definir
+limiares, janela, duração da abertura, chamadas de sondagem e comportamento
+persistido para uma tentativa impedida localmente. Também seria necessário
+decidir como coordenar essa política entre instâncias. Retry automático em
+memória ou fallback que presume sucesso/falha não substituem essa decisão:
+contornariam o agendamento durável ou afirmariam um resultado externo desconhecido.
+
+**Consequências e condição para revisão:** durante uma queda, solicitações novas
+ainda podem chegar ao provedor e ocupar o worker até seus timeouts, acumulando
+pendências; o limite de tentativas por solicitação não limita o tráfego agregado.
+A ausência do breaker reduz configuração e estados operacionais, com esse custo
+explícito. Reavaliar sua adoção quando latência, taxa de falhas, ocupação do worker
+e idade/volume do backlog demonstrarem chamadas repetidamente inúteis ou risco
+ao orçamento de chamadas do provedor. A adoção deve integrar rejeição local,
+claim e preparação sem consumir tentativas de envio nem criar ambiguidade apenas
+porque o circuito está aberto. Deve preservar pendências, definir retomada e
+sondagens seguras e ter testes próprios. Um breaker não resolve idempotência
+externa nem reconciliação; ambas continuam dependentes do contrato do provedor.
+
+Rastreabilidade: `ActivationProviderConfiguration` (timeouts e transporte),
+`ActivationRequestWorker` (execução assíncrona), `ActivationRetryPolicy`
+(backoff/jitter) e o protocolo da [ADR-0001](0001-metadados-de-processamento.md).
 
 ## Evidências existentes e limitações
 

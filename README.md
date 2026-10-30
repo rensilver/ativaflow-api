@@ -32,6 +32,13 @@ um resultado externo indeterminado permanece em `PROCESSING` e bloqueia reenvio.
 | Limitações da integração | Sem idempotência garantida pelo provedor, reconciliação automática ou renovação de lease. `429/503` são indeterminados por padrão; retry exige contrato explícito de não ativação. Timeouts continuam bloqueados para reconciliação. |
 | Próximas evoluções | Prometheus, métricas de negócio, logs JSON e tracing opcional. Detalhes e prioridades em [Ações pendentes](PENDING_ACTIONS.md). |
 
+As decisões estão consolidadas nos dois ADRs existentes:
+[processamento assíncrono](docs/adr/0001-metadados-de-processamento.md#decisão-de-processamento-assíncrono-persistido)
+e [duplicidade/idempotência local](docs/adr/0001-metadados-de-processamento.md#decisão-de-duplicidade-e-idempotência-local)
+na ADR-0001; [uso do WireMock](docs/adr/0002-contrato-minimo-provedor.md#decisão-de-usar-wiremock)
+e [ausência de Circuit Breaker](docs/adr/0002-contrato-minimo-provedor.md#decisão-de-não-usar-circuit-breaker)
+na ADR-0002, com contexto, alternativas, consequências e limites.
+
 ## Roteiro curto de uso
 
 Execute na raiz do projeto em Bash com JDK 21, Docker Engine/Compose, curl e jq.

@@ -15,6 +15,88 @@ Os estados públicos continuam `PENDING`, `PROCESSING`, `COMPLETED` e `FAILED`.
 Espera por retry e resultado indeterminado permanecem em `PROCESSING`. Os campos
 abaixo não entram nos DTOs públicos e não podem ser recebidos do consumidor.
 
+## Decisão de processamento assíncrono persistido
+
+**Contexto:** a ativação depende de HTTP externo sujeito a lentidão, timeout e
+queda do processo. A criação precisa confirmar o trabalho local sem esperar essa
+dependência e permitir retomada após reinício.
+
+**Decisão:** persistir a solicitação em `PENDING` e confirmar sua transação antes
+do processamento. O POST retorna `201 Created`, `Location` e a fotografia da
+criação; isso confirma persistência, sem prometer ativação concluída. O worker
+com `@Scheduled`, habilitado por padrão, consulta o PostgreSQL, adquire claim e
+prepara a tentativa em transações curtas próprias. O HTTP ocorre fora de transação;
+o resultado é gravado em outra transação condicional à posse e versão válidas.
+O protocolo detalhado nas próximas seções é parte desta decisão.
+
+**Alternativas consideradas:**
+
+| Alternativa | Motivo para não adotar nesta etapa |
+| --- | --- |
+| Chamar o provedor durante o POST | Acopla o tempo de resposta à dependência externa; manter a transação aberta durante o HTTP também reteria recursos do banco. |
+| Usar somente `@Async`, executor ou evento em memória | O trabalho pode desaparecer na queda do processo; o commit precisa deixar uma pendência recuperável sem depender de uma notificação em memória. |
+| Introduzir broker e publicação de mensagens | Acrescenta infraestrutura e coordenação entre commit e publicação. O polling do trabalho já persistido atende o escopo atual sem essa segunda escrita. |
+
+**Consequências:** criação e conclusão têm tempos distintos; o consumidor consulta
+o estado por GET. O polling acrescenta consultas ao banco e espera até a próxima
+busca. Persistir a pendência permite retomada após restart, mas exige claim,
+lease, versão e proteção preventiva para não reenviar resultados desconhecidos.
+Uma falha depois da preparação pode reter trabalho mesmo sem envio efetivo;
+sem reconciliação automática, essa retenção exige intervenção operacional.
+Não há garantia de efeito externo exatamente uma vez.
+
+Rastreabilidade: [SPEC-03](../../specs/03-integracao-provedor.md),
+[criação no README](../../README.md#criação-de-solicitações),
+`ActivationRequestProcessingIntegrationTests` (commit, scheduler, HTTP fora de
+transação e GET) e `ActivationRequestSchedulerRestartTests` (retomada segura e
+preservação do bloqueio de reconciliação).
+
+## Decisão de duplicidade e idempotência local
+
+**Contexto:** repetir um POST após perder sua resposta não deve criar outra
+solicitação. Consultas prévias podem disputar com outras inserções, inclusive em
+instâncias distintas. A unicidade de `externalId` é global, enquanto o acesso à
+representação pertence ao consumidor autenticado.
+
+**Decisão:** usar a constraint `uk_activation_requests_external_id`, criada na
+V1, como garantia de unicidade. A consulta prévia é uma otimização. A inserção
+ocorre em `ActivationRequestCreationTransaction` com `REQUIRES_NEW`; se perder
+a disputa por essa constraint, termina com rollback antes de reler o vencedor
+em nova transação. Outras violações de integridade não são tratadas como repetição.
+
+| Situação | Resposta e efeito local |
+| --- | --- |
+| `externalId` novo | `201 Created` e `Location`; uma nova solicitação persistida. |
+| Mesmo `externalId`, consumidor, `customerId` e `productCode` | `200 OK` com a representação atual, em qualquer dos quatro estados; sem nova linha, reinício ou tentativa adicional causada pela repetição. |
+| Mesmo `externalId` com conteúdo divergente ou outro consumidor | `409 Conflict` genérico; sem alterar o registro nem revelar a representação ou o proprietário alheio. |
+
+A comparação preserva caixa e espaços, sem normalização. Uma repetição mantém
+ID, datas, correlação e metadados; o worker pode avançar o trabalho original
+independentemente dela. O `Location` acompanha somente a criação.
+
+**Alternativas consideradas:** confiar apenas em consulta seguida de inserção
+deixa uma janela de corrida; `synchronized` protege somente a mesma JVM;
+`@Version` protege atualizações, sem impedir inserções com UUIDs diferentes.
+Tornar a chave única por consumidor contraria a unicidade global prevista na
+[SPEC-02](../../specs/02-duplicidade-e-concorrencia.md). Rejeitar toda repetição
+com `409` impediria recuperar a representação de um pedido idêntico após perda
+da resposta; sobrescrever o payload ou reiniciar o processamento poderia mudar
+uma ativação já iniciada.
+
+**Consequências:** a API reutiliza o efeito local mesmo em criações concorrentes,
+mas depende do PostgreSQL e do tratamento correto da fronteira transacional.
+O conflito genérico informa indisponibilidade do identificador sem expor dados
+do outro consumidor. Outro `externalId` cria outra solicitação, mesmo com cliente
+e produto iguais. Essa idempotência local não deduplica ativações no provedor:
+não há `Idempotency-Key` contratado ou enviado. Claim e lease coordenam posse
+local, mas não comprovam ausência de efeito remoto após uma falha; aplica-se o
+bloqueio conservador descrito nesta decisão e na [ADR-0002](0002-contrato-minimo-provedor.md).
+
+Rastreabilidade: [duplicidade no README](../../README.md#idempotência-da-api-e-idempotência-da-operação-externa),
+`CreateActivationRequestEndpointTests` (repetição, divergência, isolamento por
+consumidor e corrida pela constraint), `ActivationRequestClaimTests` e
+`ActivationRequestAmbiguousOutcomeTests` (posse e proteção contra reenvio ambíguo).
+
 ## Dicionário persistido
 
 | Coluna / propriedade Java | Tipo SQL / Java | Nulidade e padrão | Contrato |
