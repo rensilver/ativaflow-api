@@ -1,4 +1,58 @@
 services:
+  app:
+    image: ativaflow-api:local
+    build:
+      context: .
+    ports:
+      - "127.0.0.1:${SERVER_PORT:-8080}:8080"
+    environment:
+      SPRING_PROFILES_ACTIVE: local
+      SERVER_PORT: "8080"
+      API_MAX_BODY_BYTES: ${API_MAX_BODY_BYTES:-16384}
+      API_RATE_LIMIT_ENABLED: ${API_RATE_LIMIT_ENABLED:-true}
+      API_RATE_LIMIT_REQUESTS: ${API_RATE_LIMIT_REQUESTS:-120}
+      API_RATE_LIMIT_WINDOW: ${API_RATE_LIMIT_WINDOW:-1m}
+      API_RATE_LIMIT_MAX_KEYS: ${API_RATE_LIMIT_MAX_KEYS:-10000}
+      DB_URL: jdbc:postgresql://postgres:5432/ativaflow
+      DB_USERNAME: ${DB_USERNAME:-ativaflow}
+      DB_PASSWORD: ${DB_PASSWORD:?Preencha DB_PASSWORD no .env ou no ambiente}
+      ACTIVATION_PROVIDER_BASE_URL: http://activation-provider-mock:8080
+      ACTIVATION_PROVIDER_RETRY_CONTRACT: ${ACTIVATION_PROVIDER_RETRY_CONTRACT:-none}
+      SPRING_SECURITY_OAUTH2_RESOURCESERVER_JWT_ISSUERURI: ${SPRING_SECURITY_OAUTH2_RESOURCESERVER_JWT_ISSUERURI:-https://ativaflow.local}
+      SPRING_SECURITY_OAUTH2_RESOURCESERVER_JWT_AUDIENCES: ${SPRING_SECURITY_OAUTH2_RESOURCESERVER_JWT_AUDIENCES:-ativaflow-api}
+      SPRING_SECURITY_OAUTH2_RESOURCESERVER_JWT_PUBLICKEYLOCATION: file:/run/secrets/jwt-public.pem
+    secrets:
+      - source: jwt-public-key
+        target: jwt-public.pem
+    depends_on:
+      postgres:
+        condition: service_healthy
+      activation-provider-mock:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "--silent", "--show-error", "--max-time", "3", "http://localhost:8080/actuator/health/readiness"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 60s
+    stop_grace_period: 40s
+    mem_limit: 512m
+
+  postgres:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_DB: ativaflow
+      POSTGRES_USER: ${DB_USERNAME:-ativaflow}
+      POSTGRES_PASSWORD: ${DB_PASSWORD:?Preencha DB_PASSWORD no .env ou no ambiente}
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -U \"$$POSTGRES_USER\" -d \"$$POSTGRES_DB\""]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 10s
+
   activation-provider-mock:
     image: wiremock/wiremock:3.13.2
     ports:
@@ -6,3 +60,16 @@ services:
     volumes:
       - ./infra/wiremock/mappings:/home/wiremock/mappings:ro
       - ./infra/wiremock/__files:/home/wiremock/__files:ro
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "--silent", "--show-error", "--max-time", "3", "http://localhost:8080/__admin/health"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+
+volumes:
+  postgres-data:
+
+secrets:
+  jwt-public-key:
+    file: ${JWT_PUBLIC_KEY_FILE:-./.env.jwt-public.pem}

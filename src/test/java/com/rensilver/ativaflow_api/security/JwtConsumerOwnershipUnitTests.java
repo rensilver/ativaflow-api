@@ -58,6 +58,7 @@ import org.springframework.web.context.support.StaticWebApplicationContext;
 import org.springframework.web.cors.UrlBasedCorsConfigurationSource;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static com.rensilver.ativaflow_api.support.RequestLimitTestFilters.disabledRateLimitFilter;
 import static org.hamcrest.Matchers.containsString;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.eq;
@@ -115,7 +116,7 @@ class JwtConsumerOwnershipUnitTests {
 				.anonymous(Customizer.withDefaults()).exceptionHandling(Customizer.withDefaults())
 				.logout(Customizer.withDefaults()).servletApi(Customizer.withDefaults());
 		var filters = new FilterChainProxy(new SecurityConfiguration()
-				.securityFilterChain(http, new SecurityProblemHandler(json)));
+				.securityFilterChain(http, new SecurityProblemHandler(json), disabledRateLimitFilter()));
 		mvc = MockMvcBuilders.standaloneSetup(new ActivationRequestController(service))
 				.setControllerAdvice(new ApiExceptionHandler())
 				.setMessageConverters(new MappingJackson2HttpMessageConverter(json))

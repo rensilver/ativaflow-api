@@ -63,6 +63,31 @@ class LocalAccessTokenMaterialUnitTests {
 				.isEqualTo(consumer);
 	}
 
+	@Test
+	void monitoringTokenUsesSeparateHeaderAndOnlyMonitoringScope() throws Exception {
+		Path material = Path.of(run("create").strip());
+		String apiHeader = Files.readString(material.resolve("authorization.header"));
+		var properties = new OAuth2ResourceServerProperties();
+		properties.getJwt().setIssuerUri("https://ativaflow.local");
+		properties.getJwt().setAudiences(List.of("ativaflow-api"));
+		properties.getJwt().setPublicKeyLocation(new FileSystemResource(material.resolve("public.pem")));
+
+		assertThat(run("monitor-token", material.toString())).isEmpty();
+		String header = Files.readString(material.resolve("monitoring.header"));
+		var jwt = new LocalJwtDecoderConfiguration().localJwtDecoder(properties)
+				.decode(header.substring("Authorization: Bearer ".length()).strip());
+
+		assertThat(jwt.getSubject()).isEqualTo("prometheus");
+		assertThat(jwt.getClaimAsString("token_use")).isEqualTo("access");
+		assertThat(jwt.getExpiresAt()).isBetween(java.time.Instant.now(), java.time.Instant.now().plusSeconds(300));
+		assertThat(new ConsumerJwtAuthenticationConverter().convert(jwt).getAuthorities())
+				.extracting(authority -> authority.getAuthority()).containsExactly("SCOPE_monitoring/read");
+		assertThat(Files.getPosixFilePermissions(material.resolve("monitoring.header")))
+				.isEqualTo(java.nio.file.attribute.PosixFilePermissions.fromString("rw-------"));
+		assertThat(Files.readString(material.resolve("authorization.header"))).isEqualTo(apiHeader);
+		assertThat(run("monitor-token", material.toString())).isEmpty();
+	}
+
 	private String run(String... arguments) throws Exception {
 		var command = new java.util.ArrayList<>(List.of(
 				Path.of(System.getProperty("java.home"), "bin/java").toString(),

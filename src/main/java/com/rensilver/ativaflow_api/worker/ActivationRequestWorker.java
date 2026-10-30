@@ -10,8 +10,12 @@ import com.rensilver.ativaflow_api.repository.ActivationRequestRepository;
 import com.rensilver.ativaflow_api.service.ActivationRequestAttemptService;
 import com.rensilver.ativaflow_api.service.ActivationRequestClaimService;
 import com.rensilver.ativaflow_api.service.ActivationRequestOutcomeHandler;
+import io.micrometer.core.instrument.Counter;
+import io.micrometer.core.instrument.MeterRegistry;
+import io.micrometer.core.instrument.composite.CompositeMeterRegistry;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Component;
@@ -30,16 +34,27 @@ public class ActivationRequestWorker {
 	private final ActivationRequestOutcomeHandler outcomes;
 	private final ActivationProviderClient provider;
 	private final ActivationRequestRepository repository;
+	private final Counter retries;
 	private final String workerId = UUID.randomUUID().toString();
 
 	public ActivationRequestWorker(ActivationRequestClaimService claims, ActivationRequestAttemptService attempts,
 			ActivationRequestOutcomeHandler outcomes, ActivationProviderClient provider,
 			ActivationRequestRepository repository) {
+		this(claims, attempts, outcomes, provider, repository, new CompositeMeterRegistry());
+	}
+
+	@Autowired
+	public ActivationRequestWorker(ActivationRequestClaimService claims, ActivationRequestAttemptService attempts,
+			ActivationRequestOutcomeHandler outcomes, ActivationProviderClient provider,
+			ActivationRequestRepository repository, MeterRegistry registry) {
 		this.claims = claims;
 		this.attempts = attempts;
 		this.outcomes = outcomes;
 		this.provider = provider;
 		this.repository = repository;
+		this.retries = Counter.builder("activation.provider.retries")
+				.description("Provider attempts dispatched after the first persisted attempt")
+				.register(registry);
 	}
 
 	/** Runs after the configured delay and drains all currently available work. */
@@ -78,6 +93,9 @@ public class ActivationRequestWorker {
 			String result = "UNEXPECTED_ERROR";
 			String persistence = "NOT_RECORDED";
 			try {
+				if (prepared.attemptCount() > 1) {
+					retries.increment();
+				}
 				var outcome = provider.activate(new ActivationProviderRequest(
 						request.getExternalId(), request.getCustomerId(), request.getProductCode()));
 				result = switch (outcome) {

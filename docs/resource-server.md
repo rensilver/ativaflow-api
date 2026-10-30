@@ -139,7 +139,7 @@ inclusive quando há somente um issuer configurado. Tokens locais antigos sem
 O POST `/api/v1/requests` exige a authority `SCOPE_requests/write`. Os GETs
 `/api/v1/requests` e `/api/v1/requests/{id}` exigem `SCOPE_requests/read`.
 O conversor padrão do Spring adiciona `SCOPE_` aos escopos do JWT. O utilitário
-local emite `scope="requests/read requests/write"` na criação e na renovação;
+local emite `scope="requests/read requests/write"` nos comandos `create` e `token`;
 renove tokens antigos sem escopos para usar os endpoints. Um token válido sem o
 escopo necessário recebe `403` com Problem Details e desafio Bearer
 `insufficient_scope`; a ausência de autenticação recebe `401`.
@@ -182,11 +182,15 @@ não alteram a identidade. O body de criação aceita somente `externalId`,
 | `GET /api/v1/requests` | JWT válido, `SCOPE_requests/read`; conteúdo e contagem restritos ao consumidor. |
 | `GET /api/v1/requests/{id}` | JWT válido, `SCOPE_requests/read`; recurso alheio ou inexistente retorna `404`. |
 | Swagger UI, OpenAPI e health/probes | Acesso anônimo permitido pela configuração de segurança. |
-| Demais rotas, inclusive outros endpoints Actuator expostos | Autenticação obrigatória; não há escopo específico adicional configurado. |
+| `GET /actuator/prometheus` | JWT válido, `SCOPE_monitoring/read`; identidade exclusiva do coletor, sem escopos de negócio. |
+| Demais rotas | Autenticação obrigatória; não há escopo específico adicional configurado. Os demais endpoints administrativos do Actuator não estão expostos. |
 
 Escopo concede a operação, mas não acesso aos dados de outro consumidor. A
 listagem sem registros acessíveis retorna uma página vazia. A existência de uma
 regra de segurança não implica que o endpoint esteja implementado ou exposto.
+O emissor deve conceder `monitoring/read` somente à identidade de monitoramento;
+`requests/read` e `requests/write` não permitem coleta. A política de rede,
+renovação e configuração do coletor está em [acesso ao Prometheus](../README.md#acesso-ao-prometheus).
 
 ## Respostas de autenticação e autorização
 

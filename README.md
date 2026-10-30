@@ -1,13 +1,115 @@
 # AtivaFlow API
 
-Projeto Java 21 com Spring Boot 3.5.16, organizado em camadas para uma API REST.
-A base atual reúne dependências, configurações por ambiente, estrutura de pacotes,
-migrações, entidade JPA com transições de estado, auditoria e controle otimista,
-e DTOs públicos como records com Bean Validation na entrada, além da criação
-de solicitações por `POST /api/v1/requests` e consulta por `GET /api/v1/requests/{id}`.
-Os pacotes de aplicação possuem suas responsabilidades descritas em
-`package-info.java`; o cliente HTTP do provedor está implementado, e o worker
-que o acionará continua pendente.
+API REST Java 21 com Spring Boot 3.5.16 para receber solicitações de ativação de
+produtos, persistir o trabalho e consultar seu andamento. O POST confirma a
+criação sem aguardar o provedor; um worker com scheduler habilitado por padrão
+busca trabalho no PostgreSQL e chama o provedor via HTTP após o commit.
+A API oferece consulta individual e listagem paginada, autenticação JWT,
+escopos de leitura/escrita e isolamento por consumidor. Repetições idênticas
+reutilizam a solicitação; divergências retornam conflito.
+
+## Arquitetura e estado atual
+
+```mermaid
+flowchart LR
+    Consumer[Consumidor com JWT] -->|POST e GET| API[Controller e serviços]
+    API -->|Criação e consultas| DB[(PostgreSQL)]
+    Worker[Worker com scheduler] -->|Claim, preparação e resultado| DB
+    Worker -->|HTTP fora de transação| Client[ActivationProviderClient / RestClient]
+    Client -->|POST /provider/v1/activate| Provider[Provedor simulado WireMock]
+```
+
+O banco mantém o trabalho durável e coordena instâncias por claim, lease e versão.
+Cada etapa de escrita do worker confirma sua própria transação curta antes da
+seguinte. O estado público segue `PENDING → PROCESSING → COMPLETED` ou `FAILED`;
+um resultado externo indeterminado permanece em `PROCESSING` e bloqueia reenvio.
+
+| Situação | Implementação, evidência ou limite |
+| --- | --- |
+| Implementado | API, validação e Problem Details; [limites de body/tráfego](#limites-de-body-e-tráfego); JWT/escopos/BOLA; unicidade global e repetição 201/200/409; worker, HTTP e persistência de resultados; Dockerfile e Compose; [probes de saúde](#probes-de-saúde), [Prometheus protegido](#acesso-ao-prometheus) e [eventos de processamento com JSON em produção](#eventos-de-processamento-nos-logs). |
+| Cobertura automatizada existente | Testes de endpoints e concorrência com PostgreSQL/Testcontainers, autorização, cliente HTTP com WireMock, orquestração e recuperação. As suítes integradas de processamento e restart habilitam o scheduler explicitamente; as demais usam o padrão desligado do perfil `test`. Evidências em [Testes e integração contínua](#testes-e-integração-contínua). |
+| Demonstração documentada | [Roteiro completo](docs/container-image.md#demonstração-autenticada-e-retomada-de-pendências) de JWT, POST/GET, chamada ao mock e retomada de `PENDING` após recriação com volume persistente. A execução registrada em [A01](PENDING_ACTIONS.md#a01--empacotamento-e-execução-reproduzível) não substitui testes automatizados com scheduler ativo. |
+| Limitações da integração | Sem idempotência garantida pelo provedor, reconciliação automática ou renovação de lease. `429/503` são indeterminados por padrão; retry exige contrato explícito de não ativação. Timeouts continuam bloqueados para reconciliação. |
+| Próximas evoluções | Tracing opcional. Detalhes e prioridades em [Ações pendentes](PENDING_ACTIONS.md). |
+
+As decisões estão consolidadas nos dois ADRs existentes:
+[processamento assíncrono](docs/adr/0001-metadados-de-processamento.md#decisão-de-processamento-assíncrono-persistido)
+e [duplicidade/idempotência local](docs/adr/0001-metadados-de-processamento.md#decisão-de-duplicidade-e-idempotência-local)
+na ADR-0001; [uso do WireMock](docs/adr/0002-contrato-minimo-provedor.md#decisão-de-usar-wiremock)
+e [ausência de Circuit Breaker](docs/adr/0002-contrato-minimo-provedor.md#decisão-de-não-usar-circuit-breaker)
+na ADR-0002, com contexto, alternativas, consequências e limites.
+
+## Roteiro curto de uso
+
+Execute na raiz do projeto em Bash com JDK 21, Docker Engine/Compose, curl e jq.
+As portas `8080` e `8081` devem estar livres. Os comandos usam o Compose completo;
+para PostgreSQL próprio e API na máquina, veja [Execução local](#execução-local).
+
+1. Copie `.env.example` para `.env` se ainda não existir e preencha `DB_PASSWORD`.
+   Mantenha `SERVER_PORT=8080` neste roteiro. O Compose lê `.env` automaticamente.
+2. Gere o JWT efêmero e disponibilize somente a chave pública ao container:
+
+   ```bash
+   export JWT_DEMO_DIR="$(java scripts/LocalJwt.java create)"
+   source "$JWT_DEMO_DIR/env.sh"
+   export JWT_PUBLIC_KEY_FILE="$PWD/.env.jwt-public.pem"
+   cp -- "$JWT_DEMO_DIR/public.pem" "$JWT_PUBLIC_KEY_FILE"
+   chmod 0444 "$JWT_PUBLIC_KEY_FILE"
+   docker compose config --quiet
+   docker compose up --build -d --wait
+   curl --fail http://localhost:8080/actuator/health
+   ```
+
+3. Após o build, renove o token de cinco minutos e envie a solicitação. O header
+   Bearer é lido do arquivo privado, sem copiar o token para o comando:
+
+   ```bash
+   java scripts/LocalJwt.java token "$JWT_DEMO_DIR"
+   export DEMO_EXTERNAL_ID="QUICKSTART-$(date -u +%Y%m%dT%H%M%SZ)-$RANDOM"
+   export DEMO_PAYLOAD="$(jq -nc --arg id "$DEMO_EXTERNAL_ID" \
+     '{externalId:$id,customerId:"CUST-001",productCode:"INTERNET-500"}')"
+   curl --fail-with-body --silent --show-error --dump-header "$JWT_DEMO_DIR/post.headers" \
+     --header "@$JWT_DEMO_DIR/authorization.header" \
+     --header 'Content-Type: application/json' --data "$DEMO_PAYLOAD" \
+     http://localhost:8080/api/v1/requests > "$JWT_DEMO_DIR/created.json"
+   cat "$JWT_DEMO_DIR/post.headers"
+   jq . "$JWT_DEMO_DIR/created.json"
+   export DEMO_REQUEST_ID="$(jq -er '.id' "$JWT_DEMO_DIR/created.json")"
+   ```
+
+   A criação retorna `201`, `Location` e a fotografia em `PENDING`. O token local
+   inclui `requests/write` para POST e `requests/read` para GET.
+4. Consulte o registro com o mesmo consumidor. Repita o GET até observar
+   `COMPLETED` com o mapping padrão `204` do mock; a primeira consulta pode
+   retornar `PENDING` ou `PROCESSING`:
+
+   ```bash
+   curl --fail-with-body --silent --show-error \
+     --header "@$JWT_DEMO_DIR/authorization.header" \
+     "http://localhost:8080/api/v1/requests/$DEMO_REQUEST_ID" | jq .
+   ```
+
+   Reenviar o mesmo payload com o mesmo token retorna `200` e o estado atual.
+   Alterar cliente/produto mantendo `externalId` retorna `409`. Sem token, `401`;
+   com token válido sem escopo, `403`; entrada inválida, `400`. Veja os exemplos
+   de [criação](#criação-de-solicitações), [erros](#tratamento-centralizado-de-erros)
+   e [renovação JWT](docs/local-jwt.md#verificar-a-api-e-renovar-o-token).
+5. Encerre os serviços e remova os arquivos gerados neste roteiro:
+
+   ```bash
+   docker compose down
+   rm -- "$JWT_PUBLIC_KEY_FILE"
+   rm -r -- "$JWT_DEMO_DIR"
+   unset JWT_DEMO_DIR JWT_PUBLIC_KEY_FILE DEMO_EXTERNAL_ID DEMO_PAYLOAD DEMO_REQUEST_ID
+   ```
+
+O volume do PostgreSQL permanece após `down`; mantenha a senha para reutilizá-lo.
+Para subir novamente, gere o material JWT e copie a nova chave pública antes de
+`up`. O [guia completo](docs/container-image.md#ambiente-completo-com-docker-compose)
+explica portas, configuração e confirmação no WireMock, shutdown/restart e
+retomada de pendências. O mock usa o contrato assumido na
+[ADR-0002](docs/adr/0002-contrato-minimo-provedor.md); um provedor real exige
+validação desse contrato, autenticação própria e estratégia de reconciliação.
 
 ## Tecnologias e dependências
 
@@ -69,9 +171,9 @@ de serviços está em [Responsabilidades dos serviços](docs/service-responsibil
 | `src/main/resources/application-prod.yaml` | Configuração por variáveis de ambiente e desativação do DevTools em produção. |
 | `src/test/resources/application-test.yaml` | Configuração do provedor para o perfil de testes. |
 | `.env.example` | Modelo de variáveis para execução local. |
-| `docker-compose.yaml` | Provedor simulado local com a imagem oficial do WireMock. |
+| `docker-compose.yaml` | API, PostgreSQL com volume persistente e provedor simulado WireMock. |
 | `infra/wiremock/mappings/activation-success.json` | Mapping estático de sucesso: `POST /provider/v1/activate` retorna `204`, sem corpo. |
-| `.github/workflows/ci.yaml` | Build e testes no GitHub Actions. |
+| `.github/workflows/ci.yaml` | Build, testes e imagem Docker no GitHub Actions. |
 | `.gitignore` | Exclusões de build, arquivos de IDE e configurações locais de ambiente. |
 | `.gitattributes` | Padronização de finais de linha dos scripts do Maven Wrapper. |
 
@@ -110,8 +212,9 @@ Os nomes em `snake_case` correspondem aos campos `externalId`, `customerId`,
 `productCode`, `createdAt` e `updatedAt` do contrato da API. O limite adotado para
 os três identificadores textuais é de 100 caracteres. As datas representam
 instantes, compatíveis com `Instant` e exposição em UTC. O padrão de `updated_at`
-vale apenas para inserções; a aplicação deverá atualizá-lo a cada alteração,
-sem trigger no banco. A entidade aplica as transições de status descritas abaixo.
+vale apenas para inserções; a aplicação o atualiza por auditoria JPA ou
+explicitamente nas operações SQL do worker, sem trigger no banco. A entidade
+aplica as transições de status descritas abaixo.
 
 A migração `V2__add_activation_request_owner_and_processing_metadata.sql`
 adiciona os campos internos abaixo, preservando a V1 e o contrato público:
@@ -141,7 +244,7 @@ de resultado confirmado remove essa proteção na mesma atualização que conclu
 encerra em falha ou agenda um retry seguro. Assim, uma queda entre envio e gravação
 do resultado não libera um reenvio automático. Claim, preparação, persistência de
 resultados e liberação de leases vencidos estão implementados conforme as seções
-abaixo. A integração HTTP continua pendente.
+abaixo. O worker integra essas operações ao cliente HTTP já implementado.
 
 `consumer_id` é diferente de `customer_id`: o primeiro identifica o sistema
 consumidor autenticado; o segundo identifica o cliente informado no pedido.
@@ -153,21 +256,22 @@ ausente ou inválida resulta em `401` antes de acessar o banco. O proprietário 
 pode ser aceito do body. Os DTOs públicos aceitam apenas `externalId`,
 `customerId` e `productCode` na criação e expõem apenas `id`, `externalId`,
 `customerId`, `productCode`, `status`, `createdAt` e `updatedAt` nas respostas.
-Nenhuma das oito colunas internas deverá ser exposta na API.
+Nenhuma das colunas internas, incluindo `correlation_id`, é exposta no JSON público.
 
 O schema, a entidade JPA e os DTOs estão implementados e cobertos por testes.
-Scheduler, chamada HTTP e reconciliação ainda estão pendentes.
-O claim atribui leases e recupera somente trabalho comprovadamente seguro;
-a preparação registra a tentativa antes do HTTP e a recuperação libera a posse vencida.
+Scheduler e chamada HTTP estão implementados; reconciliação automática permanece
+pendente. O claim atribui leases e retoma somente trabalho comprovadamente seguro;
+a preparação registra a tentativa antes do HTTP. A recuperação explícita de leases
+está disponível como serviço interno, sem agendamento próprio.
 Os campos opcionais começam nulos; a sinalização de reconciliação
-permitirá manter um resultado ambíguo em
+mantém um resultado ambíguo em
 `PROCESSING`, sem adicionar estados públicos. Claim, preparação e gravação de
 resultado aplicam o limite configurado de até três tentativas totais; a constraint do banco impede somente contagens
 negativas. A unicidade de `external_id` continua global, inclusive entre
 consumidores. Os índices de listagem estão na V3; índices específicos para claim
 ainda não foram adicionados e dependerão da avaliação do plano e do volume de trabalho.
 
-`model.ActivationRequest` mapeia todas as colunas de V1/V2, com acesso JPA pelos
+`model.ActivationRequest` mapeia as colunas de V1/V2 e a correlação da V4, com acesso JPA pelos
 campos e construtor sem argumentos `protected`, compatível com o Hibernate.
 O código de aplicação usa `ActivationRequest.create(externalId, customerId,
 productCode, trustedConsumerId)`. A factory delega a um construtor privado,
@@ -185,7 +289,8 @@ estados terminais não podem ser reabertos. `fail` exige texto não vazio de at�
 100 caracteres para `last_error_code`; o chamador deve fornecer apenas um código
 categorizado, sem resposta bruta do provedor. Retry é registrado pelo serviço de
 resultados; reconciliação continua pendente. O claim usa SQL condicional no repositório, conforme
-descrito abaixo. Esta entidade ainda não implementa o protocolo de envio.
+descrito abaixo. O protocolo de envio é implementado pelo worker e pelos serviços,
+sem delegar a coordenação à entidade.
 
 `createdAt` e `updatedAt` usam `Instant`, com `@CreatedDate`, `@LastModifiedDate`
 e `AuditingEntityListener`. `JpaAuditingConfiguration` habilita a auditoria com
@@ -321,10 +426,14 @@ ou endpoint para liberar reenvios. No shutdown, deve-se deixar expirar a posse
 de uma tentativa autorizada sem apagar sua sinalização preventiva. Nenhuma dessas
 operações promete efeito externo exatamente uma vez.
 
-Os serviços são operações internas disponíveis para o futuro worker; esta etapa
-não adiciona scheduler, HTTP nem renovação de lease.
-Os métodos básicos da entidade (`complete()` e `fail()`) continuam sem implementar
-o protocolo de resultado e não devem ser usados diretamente pelo futuro worker.
+O `ActivationRequestWorker` usa claim, preparação e `ActivationRequestOutcomeHandler`
+para coordenar o envio e a gravação. Seu `poll()` usa `@Scheduled`, com intervalo
+configurável, e drena o trabalho elegível; `poll()` e `processNext()` usam
+`NOT_SUPPORTED` para suspender uma eventual transação chamadora.
+Não há renovação automática de lease: se ele vencer durante o HTTP, a gravação
+tardia é recusada e a proteção preventiva mantém o bloqueio.
+Os métodos básicos da entidade (`complete()` e `fail()`) não implementam o
+protocolo de resultado; o worker usa os serviços de atualização condicional.
 Os metadados continuam ausentes dos DTOs públicos, sem alteração dos quatro status.
 
 ## Resultados confirmados e agendamento de retries
@@ -373,7 +482,7 @@ preparação de tentativas e ao registro de falhas seguras. Resultados ambíguos
 continuam bloqueados para reconciliação, inclusive na última tentativa configurada.
 
 O PostgreSQL persiste `next_attempt_at = max(CURRENT_TIMESTAMP + atraso, retryAfter)`.
-`retryAfter` é um `Instant` opcional já interpretado pela futura integração HTTP;
+`retryAfter` é um `Instant` opcional fornecido pelo chamador do serviço;
 ausência ou data passada preserva o backoff positivo. Uma data futura posterior
 ao backoff é respeitada inclusive além do teto da base. O SQL também rejeita
 atrasos de retry menores que 1 ms. A data escolhida fica persistida: polling,
@@ -383,15 +492,20 @@ antecipam o agendamento. Não há espera com `Thread.sleep`.
 Retry seguro exige garantia de que a tentativa não ativou o produto. Código
 HTTP 500/503, timeout ou `Retry-After` isoladamente não fornecem essa garantia;
 sem ela, o chamador deve registrar resultado ambíguo e manter o bloqueio.
-A classificação de respostas e a interpretação do header continuam no escopo
-da futura integração HTTP. Nenhuma operação adiciona endpoint público.
+O cliente HTTP produz falha transitória segura para `429/503` somente quando
+`ACTIVATION_PROVIDER_RETRY_CONTRACT=rejected-before-activation` seleciona uma
+garantia contratual explícita de não ativação. Nesse modo, interpreta `Retry-After`,
+conforme a [matriz do provedor](#matriz-http--status--retry--justificativa).
+Nenhuma operação adiciona endpoint público.
 
 ## Contrato mínimo de integração com o provedor
 
 O contrato de saída de `POST /provider/v1/activate` está definido na
 [ADR-0002 — Contrato mínimo de ativação no provedor](docs/adr/0002-contrato-minimo-provedor.md).
 O enunciado não fornece schema completo e não existe contrato oficial adicional;
-as decisões abaixo são suposições confirmadas para o projeto e seu mock.
+as decisões abaixo são suposições locais documentadas. O retry opcional em
+`429/503` acrescenta uma garantia de não ativação selecionável para o mock,
+que precisa ser confirmada antes de usar com um provedor real.
 O contrato Java está disponível em `client.provider.ActivationProviderClient`,
 com a operação `ProviderOutcome activate(ActivationProviderRequest request)`.
 `ActivationProviderRequest`, em `client.provider.dto`, contém somente os três
@@ -408,7 +522,8 @@ Os construtores das variantes de falha rejeitam códigos nulos, em branco segund
 `String.isBlank()` ou maiores que 100 unidades UTF-16 com `IllegalArgumentException`.
 `TransientFailure` também rejeita `retryAfter` nulo: a ausência deve ser representada
 por `Optional.empty()`. Códigos válidos e a precisão do instante são preservados,
-sem normalização; a integração continua responsável por interpretar `Retry-After`.
+sem normalização. O cliente HTTP interpreta `Retry-After` em respostas `429/503`
+apenas com o contrato seguro selecionado; o padrão continua conservador.
 Cada chamada representa uma única tentativa, fora de transação de banco;
 persistência, limite de tentativas e agendamento continuam a cargo da aplicação.
 
@@ -438,14 +553,48 @@ válida do contexto atual em `X-Correlation-ID`; não copia `Authorization`, coo
 ou o JWT do consumidor. A autenticação própria de um provedor real depende de
 contrato futuro.
 
-Os eventos de tentativa são emitidos em nível `INFO` com campos estruturados
-SLF4J, visíveis no formato padrão do Logback:
+Os eventos de processamento são emitidos em nível `INFO` com campos estruturados
+SLF4J. O profile `prod` habilita JSON na saída padrão pelo
+[suporte nativo do Spring Boot 3.5](https://docs.spring.io/spring-boot/3.5/reference/features/logging.html#features.logging.structured.logstash),
+com `logging.structured.format.console=logstash` e banner desligado. Cada linha
+contém um objeto JSON com `@timestamp`, `level`, `logger_name`, `thread_name`,
+`message` e os campos aplicáveis abaixo. Números e booleanos preservam seus tipos;
+quebras de linha nas mensagens são escapadas. O formato legível permanece em
+`local` e `test`; o Compose usa `local`. Para coletar JSON também nesse ambiente,
+defina `LOGGING_STRUCTURED_FORMAT_CONSOLE=logstash` no processo da aplicação
+(no Compose, por um override de `services.app.environment`).
+
+### Eventos de processamento nos logs
 
 | Evento (`event`) | Campos técnicos |
 | --- | --- |
+| `activation_request_created` | `correlationId`, `requestId` interno e `status=PENDING`, somente na inserção nova. Reutilização idempotente não gera outra criação. |
+| `activation_request_claimed` | `correlationId` persistida, `requestId`, `attempt` já consumido, `leaseUntil` e `recovered`, que indica retomada direta de um lease vencido. O claim ainda exige preparação antes do HTTP. |
+| `activation_leases_recovered` | `recoveredCount`, quantidade liberada pelo serviço de recuperação em lote; não tem correlação individual nem herda a correlação da thread. O worker retoma leases vencidos diretamente pelo claim. |
+| `activation_retry_scheduled` | `correlationId` persistida, `requestId`, `attempt` consumido e `nextAttemptAt`, relido do banco com backoff/jitter e `Retry-After` aplicados. |
 | `activation_attempt_started` | `correlationId`, `requestId` interno e `attempt` com o contador já persistido, antes de chamar o provedor. |
 | `activation_provider_attempt` | `correlationId`, `httpStatus`, `responseCategory`, `durationMs` e `result`, uma vez por chamada ao cliente HTTP. |
 | `activation_attempt_finished` | `correlationId`, `requestId`, `attempt`, `result` e `persistence`, após a tentativa de gravar o resultado. |
+
+Criação, claim, recuperação em lote e agendamento são emitidos após o commit da
+respectiva transação, com cópia dos campos técnicos. Rollback, polling vazio,
+lote sem recuperação e resultado obsoleto não anunciam trabalho confirmado.
+O evento de retry exige falha transitória segura e tentativas restantes; sucesso,
+falha permanente, resultado indeterminado e limite esgotado não o geram. A releitura
+do prazo acrescenta uma consulta por retry agendado, dentro da transação curta.
+Registros antigos sem correlação válida usam o UUID interno como fallback,
+conforme o worker. O MDC anterior é restaurado após cada evento.
+
+Exemplo de uma linha no profile `prod` (identificadores ilustrativos):
+
+```json
+{"@timestamp":"2026-10-30T10:00:00Z","@version":"1","message":"Activation request lifecycle event","logger_name":"com.rensilver.ativaflow_api.service.ActivationRequestCreationTransaction","thread_name":"http-nio-8080-exec-1","level":"INFO","level_value":20000,"correlationId":"client-request-123","event":"activation_request_created","requestId":"ef9147a7-f092-46cb-ab55-d2f5dfb86bf0","status":"PENDING"}
+```
+
+`traceId` só deve aparecer quando houver tracing real; a correlação atual não
+implementa tracing distribuído (A10). Logs são evidência operacional e não um
+registro de auditoria durável: uma interrupção entre commit e emissão pode perder
+o evento. Nenhum mecanismo de outbox foi adicionado para logs.
 
 `responseCategory` distingue `HTTP_2XX`, `HTTP_3XX`, `HTTP_4XX`, `HTTP_5XX`,
 `TIMEOUT`, `COMMUNICATION_FAILURE` e `UNEXPECTED_ERROR`. `httpStatus=0` indica
@@ -465,14 +614,18 @@ Um resultado HTTP `SUCCESS` só tem gravação confirmada quando o worker regist
 
 Os eventos usam uma lista explícita de campos técnicos: não incluem payloads,
 identificadores de negócio/cliente, headers, URLs, credenciais, códigos de erro
-livres, mensagens ou stack traces de exceções. Os eventos do worker e do cliente
+livres, mensagens ou stack traces de exceções. Os eventos individuais
 podem ser relacionados por `correlationId`. Os testes unitários
 `HttpActivationProviderLoggingTests` e `ActivationRequestWorkerLoggingTests`
 cobrem classificação, duração, identificação da tentativa, falhas de persistência
-e ausência de dados sensíveis. Para executar somente esses testes:
+e ausência de dados sensíveis. `ActivationRequestLifecycleLoggingTests` verifica
+os novos eventos com PostgreSQL real, commit/rollback, correlação, recuperação e
+ausência de dados de negócio. `StructuredLoggingTests` inicializa processos Java
+isolados com a configuração real dos profiles para validar as linhas JSON, tipos,
+MDC e escape de mensagens, preservando o formato local. Para executar essa cobertura:
 
 ```bash
-./mvnw -Dtest=HttpActivationProviderLoggingTests,ActivationRequestWorkerLoggingTests test
+./mvnw -Dtest=HttpActivationProviderLoggingTests,ActivationRequestWorkerLoggingTests,ActivationRequestLifecycleLoggingTests,StructuredLoggingTests test
 ```
 
 A chamada envia `Content-Type: application/json` e apenas os três valores
@@ -502,9 +655,9 @@ não são repassadas como o código HTTP da API de criação.
 | `202 Accepted` | `PROCESSING`, com reconciliação | Não. | Aceitação não confirma conclusão; resultado `Indeterminate`. |
 | Demais `2xx` | `PROCESSING`, com reconciliação | Não. | Não estão contratados como confirmação de conclusão; resultado `Indeterminate`. |
 | `400 Bad Request` | `FAILED` | Não, em qualquer tentativa. | Supõe-se rejeição definitiva antes da ativação (`PermanentFailure`); `Retry-After` não altera essa decisão. |
-| `429 Too Many Requests` | `PROCESSING`, com reconciliação | Não, mesmo com `Retry-After`. | Limitação de tráfego não comprova ausência de ativação; resultado `Indeterminate`. |
+| `429 Too Many Requests` | Por padrão, `PROCESSING` com reconciliação. Com contrato seguro, aguarda retry ou termina em `FAILED` ao esgotar o limite. | Somente com `rejected-before-activation`, respeitando prazo e limite. | O contrato selecionado garante rejeição antes da ativação; status e header sozinhos não bastam. |
 | `500 Internal Server Error` | `PROCESSING`, com reconciliação | Não, mesmo com `Retry-After`. | A falha pode ocorrer depois da ativação; resultado `Indeterminate`. |
-| `503 Service Unavailable` | `PROCESSING`, com reconciliação | Não, mesmo com `Retry-After`. | Indisponibilidade não comprova ausência de ativação; resultado `Indeterminate`. |
+| `503 Service Unavailable` | Por padrão, `PROCESSING` com reconciliação. Com contrato seguro, aguarda retry ou termina em `FAILED` ao esgotar o limite. | Somente com `rejected-before-activation`, respeitando prazo e limite. | Mesma garantia de rejeição antes da ativação exigida para `429`. |
 | Demais respostas, incluindo `3xx`, outros `4xx` e outros `5xx` | `PROCESSING`, com reconciliação | Não. | Sem garantia contratual sobre o efeito externo; resultado `Indeterminate`. Redirecionamentos não são seguidos automaticamente. |
 | Timeout de conexão ou leitura | `PROCESSING`, com reconciliação | Não. | O timeout não comprova cancelamento nem ausência de ativação; resultado `Indeterminate`. |
 | Falha de comunicação sem resposta HTTP confiável | `PROCESSING`, com reconciliação | Não. | O efeito externo permanece desconhecido; resultado `Indeterminate`. |
@@ -527,18 +680,17 @@ da preparação permanece, sem autorizar novo envio.
   `Idempotency-Key` nem garante uma única ativação diante de reenvios. O mock
   dispensa autenticação; o mecanismo real precisa ser contratado, e o JWT do
   consumidor não é encaminhado.
-- Cada chamada ao cliente representa uma tentativa, sem retry próprio. Nenhuma
-  resposta HTTP atual produz `TransientFailure`. A aplicação já suporta esse
-  resultado para falhas com garantia contratual explícita de não ativação, mas
-  a classificação HTTP correspondente ainda depende de implementação.
+- Cada chamada ao cliente representa uma tentativa, sem retry próprio. `429/503`
+  produzem `TransientFailure` apenas com `rejected-before-activation` selecionado;
+  a aplicação agenda o próximo envio no banco, sem bloquear a thread em espera.
 - Resultados indeterminados permanecem em `PROCESSING`, inclusive após expiração
   do lease ou esgotamento das tentativas. Não há consulta externa, callback ou
   reconciliação automática implementada; é necessária intervenção operacional
   com evidência confiável do efeito externo.
 
-Quando uma integração puder produzir `TransientFailure` com segurança, o serviço
-manterá `PROCESSING` e agendará retry enquanto `attempt_count < maxAttempts`;
-ao atingir o limite, encerrará em `FAILED`, sem agendamento e sem reconciliação.
+Quando a integração produz `TransientFailure` com segurança, o serviço
+mantém `PROCESSING` e agenda retry enquanto `attempt_count < maxAttempts`;
+ao atingir o limite, encerra em `FAILED`, sem agendamento e sem reconciliação.
 São de uma a três tentativas totais (padrão: três, incluindo a inicial), conforme
 `WORKER_RETRY_MAX_ATTEMPTS`. O próximo envio respeita o maior instante entre o
 backoff exponencial com jitter e o `retryAfter` já interpretado, sem antecipar o
@@ -547,13 +699,59 @@ descritos em [Resultados confirmados e agendamento de retries](#resultados-confi
 
 O cliente traduz essa matriz para `ProviderOutcome`, com códigos internos
 `PROVIDER_REJECTED`, `PROVIDER_INTERNAL_ERROR_OUTCOME_UNKNOWN`,
-`PROVIDER_UNCONFIRMED_RESPONSE`, `PROVIDER_TIMEOUT` e `PROVIDER_COMMUNICATION_FAILURE`.
-Os corpos de resposta são ignorados. A interpretação de `Retry-After` em segundos
-ou data HTTP para retry seguro depende de uma futura integração com garantia
-contratual explícita de não ativação, conforme o ADR-0002. O cliente atual não
-produz `TransientFailure` a partir de `429/503`. O handler já recebe
+`PROVIDER_UNCONFIRMED_RESPONSE`, `PROVIDER_TIMEOUT`, `PROVIDER_COMMUNICATION_FAILURE`,
+`PROVIDER_RATE_LIMITED`, `PROVIDER_TEMPORARILY_UNAVAILABLE` e `PROVIDER_RETRY_AFTER_UNSUPPORTED`.
+Os corpos de resposta são ignorados. No contrato seguro, `Retry-After` aceita
+segundos inteiros não negativos ou data HTTP. O handler recebe
 `Optional<Instant>` em falhas comprovadamente seguras e encaminha o prazo ao
 serviço de resultados para persistência, inclusive quando ultrapassa o teto de backoff.
+
+### Habilitar retry HTTP no contrato seguro
+
+`ACTIVATION_PROVIDER_RETRY_CONTRACT` aceita `none` (padrão) ou
+`rejected-before-activation`. A segunda opção declara que **todas** as respostas
+`429/503` desse endpoint rejeitam a solicitação antes de ativar ou enfileirar
+trabalho remoto. É uma suposição explícita do cenário WireMock; um provedor real
+exige confirmação dessa garantia antes de selecionar a opção. URL, status,
+corpo vazio e `Retry-After` não selecionam o contrato automaticamente. Valores
+de configuração desconhecidos impedem a inicialização.
+
+Nesse modo, header ausente, malformado, zero ou data passada mantém o backoff
+positivo. Datas futuras não são encurtadas ao teto do backoff. Prazos numéricos
+com overflow, instantes posteriores a `9999-12-31T23:59:59Z` ou headers repetidos
+bloqueiam o reenvio com `PROVIDER_RETRY_AFTER_UNSUPPORTED` para análise operacional;
+não são convertidos em retry imediato. `500`, timeout, falhas de comunicação e
+demais respostas ambíguas continuam exigindo reconciliação em qualquer modo.
+
+O cenário opcional [activation-rejected-before-activation.json](infra/wiremock/scenarios/activation-rejected-before-activation.json)
+simula `503` antes de qualquer ativação, com espera mínima de 120 segundos.
+Ele fica fora de `mappings/`, preservando o sucesso padrão do Compose.
+Com o mock local já iniciado, carregue-o explicitamente:
+
+```bash
+curl --fail-with-body --silent --show-error \
+  --request POST 'http://localhost:8081/__admin/mappings' \
+  --header 'Content-Type: application/json' \
+  --data-binary @infra/wiremock/scenarios/activation-rejected-before-activation.json
+```
+
+Para usar esse contrato no Compose, defina
+`ACTIVATION_PROVIDER_RETRY_CONTRACT=rejected-before-activation` no ambiente ou
+`.env` e recrie a API com `docker compose up -d app`. O mesmo valor pode ser
+exportado ao executar a API diretamente. Uma nova solicitação autenticada segue
+o [roteiro curto](#roteiro-curto-de-uso), permanece `PROCESSING` entre tentativas
+e termina em `FAILED` após três rejeições confirmadas. O GET público omite os
+metadados de retry; confira tentativas e prazo no banco/logs. Para restaurar o
+mock de sucesso e remover o cenário carregado:
+
+```bash
+curl --fail-with-body --silent --show-error \
+  --request POST 'http://localhost:8081/__admin/mappings/reset'
+```
+
+Novas tentativas já agendadas ainda respeitam o prazo persistido. Ao receber `204`,
+o worker conclui a solicitação e cessa os envios. Ao encerrar a demonstração,
+restaure `ACTIVATION_PROVIDER_RETRY_CONTRACT=none` e recrie a API.
 
 Para HTTP `400`, o worker encaminha `PermanentFailure` ao
 `ActivationRequestOutcomeService.recordPermanentFailure`: a solicitação termina
@@ -636,6 +834,75 @@ O controller de criação aciona a validação com `@Valid` no parâmetro
 `@RequestBody`. As anotações não validam automaticamente uma chamada direta ao
 construtor do record.
 
+## Limites de body e tráfego
+
+As rotas `/api/` têm dois controles configuráveis em `app.http`, ativos por
+padrão no ambiente local, no Compose e em produção:
+
+| Variável | Padrão | Intervalo aceito |
+| --- | --- | --- |
+| `API_MAX_BODY_BYTES` | `16384` (16 KiB) | 1 a 1048576 bytes (1 MiB). |
+| `API_RATE_LIMIT_ENABLED` | `true` | `true` ou `false`. |
+| `API_RATE_LIMIT_REQUESTS` | `120` | 1 a 1000000 requisições por identidade/janela. |
+| `API_RATE_LIMIT_WINDOW` | `1m` | 1 ms a 1 dia, com unidades de duração. |
+| `API_RATE_LIMIT_MAX_KEYS` | `10000` | 1 a 100000 identidades mantidas em memória. |
+
+Valores inválidos impedem a inicialização. O `.env.example` contém os padrões;
+o Compose repassa essas cinco variáveis para a API. Fora do Compose, carregue-as
+no ambiente conforme o roteiro existente.
+
+`ApiBodyLimitFilter` executa depois da correlação e antes da segurança/MVC.
+Rejeita `Content-Length` acima do teto sem ler o corpo. Para os demais envios,
+lê no máximo o teto mais um byte, inclusive sem tamanho declarado ou com
+transferência chunked. Apenas um corpo aceito é disponibilizado ao MVC em um
+buffer limitado; bytes UTF-8 e espaços após o JSON também contam. O excesso
+recebe **413**, antes de executar o controller ou persistir uma solicitação,
+com `detail: Request body is too large`. Esse controle vale para qualquer
+método nas rotas `/api/`; Bean Validation continua validando os campos. Os dois
+filtros usam o caminho decodificado do servlet, cobrindo também `/a%70i/`.
+
+`ApiRateLimitFilter` executa na cadeia Spring Security depois da autenticação
+Bearer e antes da autorização. Cada consumidor usa o `sub` validado do JWT;
+sem autenticação, a chave é o IP da conexão (`remoteAddr`). Headers como
+`X-Consumer-ID`, `Forwarded` e `X-Forwarded-For` não escolhem a identidade.
+`server.forward-headers-strategy: none` mantém essa política explícita. Atrás
+de proxy, clientes anônimos podem compartilhar a mesma cota; uma política de
+proxy confiável/gateway precisa ser definida antes de mudar esse comportamento.
+
+A janela fixa começa na primeira admissão de cada identidade e aceita até a
+cota configurada, somando métodos e rotas `/api/`. Ao esgotá-la, retorna **429**,
+`detail: Request rate limit exceeded` e `Retry-After` em segundos positivos,
+arredondados para cima até o fim da janela. Rejeições não prolongam a janela.
+A admissão usa relógio monotônico e é atômica sob concorrência. Identidades
+expiradas são renovadas ou removidas quando é necessário abrir espaço; ao
+atingir `max-keys`, novas identidades recebem 429 até liberar espaço, sem
+expulsar cotas ainda ativas. Há possibilidade de rajada entre duas janelas.
+
+O estado é **em memória, por instância**: restart renova as cotas e réplicas não
+compartilham contadores. Escala horizontal exige gateway ou backend distribuído.
+O filtro não limita JWT inválido rejeitado antes dele nem substitui proteção de
+borda contra abuso de conexões. Corpos excessivos recebem 413 antes da segurança;
+401/403 que alcançam o rate limiter consomem a cota correspondente. Health,
+Actuator e documentação ficam fora desses limites de aplicação.
+
+As respostas 413/429 usam o mesmo Problem Details seguro e correlacionado das
+demais respostas, com `X-Correlation-ID` e evento `api_request_rejected`, sem
+registrar body, JWT, IP ou identidade do consumidor. O profile `test` desabilita
+o rate limiter para não acumular cotas entre testes de outros fluxos; as suítes
+específicas usam instâncias próprias e habilitam explicitamente o controle.
+
+`ApiRequestLimitsHttpTests` executa HTTP real no Tomcat com JWT RS256 assinado,
+limites de 255/256/257 bytes, framing fixo/chunked, UTF-8, sufixo após o JSON,
+429, correlação, health e caminhos codificados. `ApiBodyLimitFilterTests` usa
+também um fluxo sem fim
+para provar a leitura máxima do prefixo. As suítes de filtro, configuração e
+`InMemoryRateLimiterTests` cobrem isolamento por consumidor/IP/instância,
+concorrência, expiração, capacidade, desativação e configurações inválidas.
+
+```bash
+./mvnw -B --no-transfer-progress '-Dtest=ApiRequestLimitsHttpTests,ApiBodyLimitFilterTests,ApiRateLimitFilterTests,InMemoryRateLimiterTests,HttpLimitConfigurationTests' test
+```
+
 ## Tratamento centralizado de erros
 
 `ApiExceptionHandler`, anotado com `@RestControllerAdvice`, estende
@@ -666,6 +933,8 @@ descrição padrão. Para status sem constante em `HttpStatus`, o código numér
 | Acesso negado | 403 | `Access is denied`, com desafio Bearer apropriado. |
 | Solicitação inexistente ou de outro consumidor | 404 | `Activation request not found`. |
 | Colisão de `externalId` | 409 | `Activation request conflict`. |
+| Corpo acima do teto configurado | 413 | `Request body is too large`. |
+| Cota de tráfego da API esgotada | 429 | `Request rate limit exceeded`, com `Retry-After`. |
 | Outros erros do MVC, como método ou mídia incompatíveis | Status do MVC | Mensagem segura, preservando cabeçalhos como `Allow`. |
 | Falha inesperada ou validação do valor retornado pelo controller | 500 | `An unexpected error occurred`. |
 
@@ -822,8 +1091,9 @@ curl -i -X POST http://localhost:8080/api/v1/requests \
   --data '{"externalId":"EXT-12345","customerId":"CUST-10001","productCode":"INTERNET-500"}'
 ```
 
-As regras de escopo ainda estão pendentes. A unicidade global de `externalId` continua
-garantida pela constraint do PostgreSQL.
+O POST exige `requests/write`; os GETs exigem `requests/read`. Token válido sem
+o escopo necessário retorna `403`, conforme a [matriz de autorização](docs/resource-server.md#matriz-de-autorização).
+A unicidade global de `externalId` é garantida pela constraint do PostgreSQL.
 
 Ao repetir o `POST` com o mesmo `externalId`, `customerId`, `productCode` e
 consumidor autenticado, a API responde `200 OK` com a representação atual do
@@ -918,7 +1188,7 @@ executá-la uma vez. No AtivaFlow, há duas fronteiras distintas:
 | Operação repetida | `POST /api/v1/requests` do consumidor para o AtivaFlow. | Chamada do AtivaFlow ao provedor para ativar o produto. |
 | Efeito protegido | Registro de uma única solicitação para o mesmo `externalId`. | Uma única ativação no provedor para a mesma operação lógica, mesmo com múltiplos envios. |
 | Garantia necessária | Constraint `UNIQUE (external_id)` e reutilização do registro quando consumidor, cliente e produto coincidem. | Contrato de idempotência implementado pelo provedor, com deduplicação ou operação naturalmente idempotente. |
-| Situação atual | Implementada na criação, inclusive para requisições concorrentes. | Integração ainda pendente; não há garantia de efeito externo exatamente uma vez. |
+| Situação atual | Implementada na criação, inclusive para requisições concorrentes. | HTTP e worker implementados; não há deduplicação externa contratada nem garantia de efeito externo exatamente uma vez. |
 
 Na API, a primeira criação retorna `201 Created`; uma repetição idêntica pelo
 mesmo consumidor retorna `200 OK`, com o mesmo ID e a representação atual,
@@ -934,7 +1204,7 @@ no provedor: ele pode concluir a ativação e a aplicação perder a resposta ou
 falhar antes de persistir `COMPLETED`. Claims, leases e controle de versão
 coordenam o processamento local, mas não eliminam essa janela de incerteza.
 
-Por exemplo, na futura integração:
+Por exemplo, no fluxo atual:
 
 1. O consumidor envia `EXT-12345`, e a API persiste a solicitação com `201`.
 2. O worker prepara a tentativa, chama o provedor, e o provedor ativa o produto.
@@ -1138,6 +1408,7 @@ Nenhum perfil é ativado automaticamente. A seleção é feita por
 | `ACTIVATION_PROVIDER_BASE_URL` | URL base do provedor; padrão no perfil `local`: `http://localhost:8081`. |
 | `ACTIVATION_PROVIDER_CONNECT_TIMEOUT` | `2s`, timeout de conexão HTTP. |
 | `ACTIVATION_PROVIDER_READ_TIMEOUT` | `5s`, timeout de leitura HTTP. |
+| `ACTIVATION_PROVIDER_RETRY_CONTRACT` | `none` por padrão; `rejected-before-activation` somente com garantia contratual de rejeição antes de ativar ou enfileirar trabalho remoto em `429/503`. |
 | `ACTIVATION_PROVIDER_API_KEY` | Vazio por padrão; propriedade reservada para a integração com o provedor. |
 | `SHUTDOWN_TIMEOUT` | `30s`, limite por fase do desligamento gracioso. |
 
@@ -1179,9 +1450,31 @@ do Git. Veja o [roteiro JWT local](docs/local-jwt.md) para o modo JWKS, chamadas
 autenticadas, renovação e remoção dos arquivos ao terminar. O roteiro exige Bash
 e permissões POSIX (Linux/macOS); o modo JWKS usa também Python 3.
 
+### Imagem Docker da API
+
+O [guia da imagem Java 21](docs/container-image.md) descreve o build multi-stage,
+o runtime não-root, a configuração por ambiente e a validação com PostgreSQL,
+JWT e shutdown gracioso. Para construir a imagem a partir dos fontes:
+
+```bash
+docker build -t ativaflow-api:local .
+```
+
+### Ambiente completo no Compose
+
+O Compose inicia a API, PostgreSQL 17 e WireMock, com healthchecks e espera pelas
+dependências. Prepare a senha e a chave pública conforme o
+[guia do Compose](docs/container-image.md#ambiente-completo-com-docker-compose)
+e execute `docker compose up --build -d --wait`. Banco e provedor usam URLs
+internas; API e mock publicam portas apenas em loopback. O banco não publica porta.
+O [roteiro de demonstração](docs/container-image.md#demonstração-autenticada-e-retomada-de-pendências)
+conecta geração do JWT, POST/GET, confirmação no mock e retomada de uma pendência
+após recriar os serviços mantendo o volume, além de verificar shutdown e restart.
+
 ### Provedor simulado no Compose
 
-Com Docker Engine e Docker Compose disponíveis, execute na raiz do repositório:
+Com Docker Engine, Docker Compose e `DB_PASSWORD` preenchido no `.env`, execute
+na raiz do repositório para iniciar somente o mock:
 
 ```bash
 docker compose up -d activation-provider-mock
@@ -1197,8 +1490,8 @@ ao mock e à sua API administrativa.
 Para a API executada na máquina com o perfil `local`, mantenha
 `ACTIVATION_PROVIDER_BASE_URL=http://localhost:8081`, como em `.env.example`.
 Outros containers na mesma rede do Compose devem usar
-`http://activation-provider-mock:8080`. Nesta etapa, o Compose contém apenas o
-mock; a aplicação e o PostgreSQL continuam com a execução local descrita acima.
+`http://activation-provider-mock:8080`. A API no Compose já usa esse endereço,
+enquanto a execução na máquina continua usando `localhost:8081`.
 
 Após a inicialização do WireMock, confira diretamente o contrato simulado:
 
@@ -1208,11 +1501,20 @@ curl -i --request POST 'http://localhost:8081/provider/v1/activate' \
   --data '{"externalId":"EXT-12345","customerId":"CUST-10001","productCode":"INTERNET-500"}'
 ```
 
-O retorno esperado é `204 No Content`, sem corpo. O único mapping padrão é
+O retorno esperado é `204 No Content`, sem corpo. Essa chamada direta verifica
+somente o mock: não cria solicitação na API nem grava estado no PostgreSQL.
+O único mapping padrão é
 `infra/wiremock/mappings/activation-success.json`; não há seletor de cenários na
 API. Erros e timeouts são configurados pelo próprio WireMock dos testes, em
 instâncias isoladas com portas dinâmicas, sem depender deste container.
-O worker ainda está pendente; criar uma solicitação na API não chama o mock.
+Com a API iniciada e `WORKER_ENABLED=true` (padrão), o worker processa as
+solicitações persistidas e chama o mock automaticamente. Para demonstrar esse
+fluxo, use o POST autenticado e consulte o GET do [roteiro curto](#roteiro-curto-de-uso).
+Não espere encontrar o GET em `PENDING`: o worker pode já ter concluído a ativação.
+Para inspecionar o estado inicial sem processamento, desabilite temporariamente
+o worker na execução na máquina; no Compose use o override documentado no
+[roteiro de retomada](docs/container-image.md#demonstração-autenticada-e-retomada-de-pendências),
+pois `WORKER_ENABLED` no `.env` não é encaminhado pelo YAML atual.
 
 Após editar um mapping, reinicie o serviço para recarregá-lo. Para consultar
 logs ou encerrar o ambiente:
@@ -1221,6 +1523,235 @@ logs ou encerrar o ambiente:
 docker compose restart activation-provider-mock
 docker compose logs --tail=100 activation-provider-mock
 docker compose down
+```
+
+## Probes de saúde
+
+As probes estão habilitadas explicitamente em `application.yaml`, inclusive no
+perfil `local`, na mesma porta HTTP da API. O Actuator expõe `health` e
+`prometheus`, com [acesso de monitoramento](#acesso-ao-prometheus) específico.
+Health e seus grupos permitem consultas sem JWT e ocultam
+componentes, detalhes do banco e exceções, inclusive para consumidores autenticados.
+
+| Caminho | Critério | Resposta em caso de falha |
+| --- | --- | --- |
+| `/actuator/health/liveness` | Estado interno `livenessState`, sem banco ou provedor. | HTTP 503, `DOWN`, se a aplicação estiver em `BROKEN`. |
+| `/actuator/health/readiness` | `readinessState` e conexão com PostgreSQL (`db`). | HTTP 503, `OUT_OF_SERVICE`, ao recusar tráfego; `DOWN` se o banco estiver indisponível. |
+| `/actuator/health` | Visão agregada dos indicadores registrados. | HTTP 503 se algum indicador estiver em `DOWN` ou `OUT_OF_SERVICE`. |
+
+O banco participa da readiness porque criação e consulta precisam de persistência.
+O provedor não participa: sua indisponibilidade afeta o processamento assíncrono,
+sem impedir a API de receber ou consultar solicitações. A liveness não verifica
+dependências externas, evitando reinícios motivados por falhas no banco ou provedor.
+Os grupos usam as funcionalidades nativas do
+[Actuator no Spring Boot 3.5](https://docs.spring.io/spring-boot/3.5/reference/actuator/endpoints.html#actuator.endpoints.kubernetes-probes).
+
+Com a aplicação iniciada conforme o [roteiro curto](#roteiro-curto-de-uso), execute:
+
+```bash
+curl --fail --silent --show-error http://localhost:8080/actuator/health/liveness
+curl --fail --silent --show-error http://localhost:8080/actuator/health/readiness
+```
+
+Ambas retornam HTTP 200 com `{"status":"UP"}` quando a aplicação aceita tráfego e
+o banco está acessível. Ajuste a porta se mudar `SERVER_PORT`. O healthcheck do
+Compose consulta a readiness; a espera inicial pelo mock via `depends_on` continua
+existindo, mas o check da API não o consulta. O Compose marca o container como
+`unhealthy` se o check falhar; isso não reinicia o container nem bloqueia sua porta
+automaticamente. Um futuro orquestrador deverá usar cada probe para sua finalidade.
+
+`/actuator/env`, `/actuator/configprops`, `/actuator/heapdump`, `/actuator/metrics`
+e `/actuator/info` continuam sem exposição HTTP. Sem JWT,
+a segurança responde 401; com autenticação válida, essas rotas respondem 404.
+
+`HealthProbesIntegrationTests` carrega os perfis `local` e `test`, PostgreSQL real
+via Testcontainers e a cadeia de segurança da aplicação. Exercita os grupos,
+estados de disponibilidade e respostas sem detalhes com o provedor inacessível.
+A falha de banco é injetada apenas ao obter uma conexão; o indicador de banco e
+a agregação de saúde são reais. O perfil `test` desliga o worker e o rate limiter.
+As identidades autenticadas são simuladas; os testes de segurança existentes
+cobrem a validação criptográfica de JWT.
+Para executar essa classe:
+
+```bash
+./mvnw -B --no-transfer-progress -Dtest=HealthProbesIntegrationTests test
+```
+
+## Acesso ao Prometheus
+
+`GET /actuator/prometheus` está exposto na mesma porta da API em todos os perfis.
+Usa o registry Prometheus já presente no projeto e exige JWT válido com o escopo
+`monitoring/read` (authority `SCOPE_monitoring/read`). A regra usa o identificador
+do endpoint Actuator, acompanhando seu caminho configurado. Health continua público.
+
+| Credencial na coleta | Resultado |
+| --- | --- |
+| Sem Bearer, assinatura inválida ou token expirado | 401, com desafio Bearer. |
+| JWT válido sem `monitoring/read`, inclusive com `requests/read requests/write` | 403, Problem Details e `insufficient_scope`. |
+| JWT válido com `monitoring/read` | 200, métricas no formato Prometheus. |
+
+A política operacional é usar uma identidade exclusiva do coletor, com apenas
+`monitoring/read`, emitida pelo mesmo emissor confiável e para a audience da API.
+Esse token não concede leitura ou criação de solicitações. Cabe ao administrador
+do emissor restringir a concessão desse escopo e renovar o token antes da expiração;
+a API valida o JWT e não emite credenciais. Os demais endpoints administrativos
+listados acima continuam sem exposição.
+
+No Compose, a porta publicada da API permanece em loopback. Em produção, mantenha
+o acesso à coleta em rede interna, restrito ao monitoramento, e use HTTPS na
+entrada; não publique o caminho de métricas no ingresso público. A aplicação não
+cria porta de administração separada, firewall, servidor Prometheus ou renovador
+de credenciais. O endpoint não participa da cota de tráfego das rotas `/api/`.
+
+Para conferir localmente, inicie a API com as chaves do
+[roteiro JWT](docs/local-jwt.md). Com `JWT_DEMO_DIR` apontando para o mesmo material:
+
+```bash
+java scripts/LocalJwt.java monitor-token "$JWT_DEMO_DIR"
+curl --fail --silent --show-error http://localhost:8080/actuator/prometheus \
+  --header @"$JWT_DEMO_DIR/monitoring.header"
+```
+
+O comando grava `monitoring.header` com permissão `600`, `sub=prometheus`, apenas
+`scope=monitoring/read` e validade de cinco minutos. Repeti-lo renova o token com
+as mesmas chaves, preservando `authorization.header` e os escopos do consumidor
+da API. O token fica em arquivo, sem impressão no console ou na linha de comando.
+No ambiente em que `/tmp` estiver dentro de um checkout Git, use
+`java -Djava.io.tmpdir=/var/tmp scripts/LocalJwt.java create` na geração inicial.
+
+Exemplo de configuração para um Prometheus executado no host local:
+
+```yaml
+scrape_configs:
+  - job_name: ativaflow-api
+    metrics_path: /actuator/prometheus
+    scrape_interval: 30s
+    scrape_timeout: 5s
+    scheme: http
+    authorization:
+      type: Bearer
+      credentials_file: /run/secrets/ativaflow-monitoring.token
+    static_configs:
+      - targets: ['127.0.0.1:8080']
+```
+
+O arquivo `credentials_file`, acessível ao processo Prometheus, deve conter somente
+o JWT, sem `Authorization:` nem `Bearer`. Para a demonstração, prepare sua origem
+fora do Git e monte-a somente para leitura no caminho indicado:
+
+```bash
+(
+  umask 077
+  sed 's/^Authorization: Bearer //' "$JWT_DEMO_DIR/monitoring.header" \
+    > "$JWT_DEMO_DIR/monitoring.token"
+)
+```
+
+Após cada renovação local, atualize também `monitoring.token`. O exemplo não
+implementa renovação automática. Em produção, forneça e renove a credencial pelo
+fluxo do emissor externo, com armazenamento protegido, conforme a
+[gestão de segredos](docs/resource-server.md). Ajuste endereço, porta, caminho
+e `scheme: https` ao ambiente; dentro de outro container, `127.0.0.1` é o próprio
+container. A sintaxe de autenticação segue a
+[configuração oficial do Prometheus](https://prometheus.io/docs/prometheus/latest/configuration/configuration/#http_config);
+a exposição segue o [Actuator do Spring Boot 3.5](https://docs.spring.io/spring-boot/3.5/reference/actuator/endpoints.html#actuator.endpoints.exposing).
+Remova os dois arquivos de monitoramento junto com o material JWT ao encerrar
+a demonstração, seguindo a [limpeza do roteiro local](docs/local-jwt.md#encerrar-e-remover-material).
+
+`PrometheusEndpointIntegrationTests` valida o scrape e sua restrição por HTTP real,
+com PostgreSQL via Testcontainers, registry ativo e JWT RS256 assinado validado
+pelo decoder local da aplicação. Cobre ausência de token, escopos insuficientes,
+assinatura inválida, expiração, isolamento das operações de negócio e manutenção
+da exposição mínima. O teste do utilitário confere escopo, assinatura, validade,
+permissão do arquivo e preservação do header da API. Execute:
+
+```bash
+./mvnw -B --no-transfer-progress \
+  -Dtest=PrometheusEndpointIntegrationTests,LocalAccessTokenMaterialUnitTests test
+```
+
+### Métricas coletadas
+
+O mesmo endpoint autenticado publica as métricas automáticas de HTTP, JVM e
+Hikari e a instrumentação do processamento:
+
+| Série Prometheus | Significado e tags |
+| --- | --- |
+| `http_server_requests_seconds_count`, `_sum` | Quantidade e duração do HTTP de entrada, por rota normalizada, método e status. |
+| `jvm_memory_used_bytes`, `jvm_threads_live_threads`, `jvm_gc_pause_seconds_count` | Memória, threads e pausas de GC (a série de pausas aparece após uma coleta). |
+| `hikaricp_connections_active`, `_idle`, `_pending`, `_timeout_total`, `_acquire_seconds_count` | Uso do pool, espera, timeout e duração de aquisição; tag `pool`. |
+| `activation_provider_attempts_seconds_count`, `_sum`, `_bucket` | Uma amostra por chamada ao provedor, incluindo falhas; tags `category` e `result`. |
+| `activation_provider_retries_total` | Tentativas enviadas pelo worker após a primeira tentativa persistida. Não conta apenas o agendamento, nem claims sem preparação válida. |
+| `activation_requests` | Quantidade persistida por `state`: `PENDING`, `PROCESSING`, `COMPLETED`, `FAILED`, incluindo zero para estados ausentes. |
+| `activation_requests_snapshot_timestamp` | Horário Unix em segundos da última atualização bem-sucedida das contagens. Zero enquanto não houve atualização. |
+| `activation_requests_snapshot_failures_total` | Falhas de atualização das contagens; sem detalhes do banco nas tags. |
+
+O timer do provedor usa categorias fixas: famílias `HTTP_2XX`, `HTTP_4XX`,
+`HTTP_5XX` (outra família HTTP recebida segue o mesmo formato), `TIMEOUT`,
+`COMMUNICATION_FAILURE` e `UNEXPECTED_ERROR`. Os resultados são `SUCCESS`,
+`PERMANENT_FAILURE`, `TRANSIENT_FAILURE`, `INDETERMINATE` e `UNEXPECTED_ERROR`.
+Timeout continua indeterminado; observabilidade não autoriza retry.
+As séries do timer são criadas quando a combinação ocorre e medem somente a
+chamada, sem backoff, espera na fila ou gravação do resultado. O contador de retry
+mede o despacho local e não comprova recebimento ou conclusão no provedor.
+IDs, consumidor, cliente, produto, correlação, URL, payload e mensagens de erro
+não são tags das métricas específicas.
+
+As contagens usam uma única consulta `GROUP BY status`, com timeout de consulta
+de 5 segundos, a cada 30 segundos após o término da atualização anterior.
+O scheduler é separado do worker; a obtenção de conexão também está sujeita ao
+`DB_CONNECTION_TIMEOUT_MS`. O scrape lê somente um snapshot imutável em memória,
+sem executar SQL. Ajuste o intervalo com a propriedade Spring
+`app.metrics.state-refresh-interval`, por exemplo
+`--app.metrics.state-refresh-interval=1m`. A primeira atualização é agendada na
+inicialização. Antes dela os totais são `NaN`; em falha, os últimos valores e seu
+horário permanecem disponíveis e o contador de falhas aumenta. Monitore a idade
+do snapshot para não tratar dados antigos como contagens atuais.
+
+A consulta retorna no máximo quatro linhas, mas ainda pode percorrer toda a
+tabela: em bases grandes, aumente o intervalo e avalie pré-agregação conforme
+medição. Cada instância consulta o mesmo banco; **não some** esses totais entre
+réplicas. Contadores e timers são locais à instância e reiniciam com o processo;
+as contagens persistidas são reconstruídas após reinício. Use `max by (state)`
+para visualizar uma aproximação dos totais entre réplicas, considerando a idade
+dos snapshots.
+
+Exemplos PromQL (janela de 5 minutos):
+
+```promql
+# Latência média em segundos por categoria.
+sum by (category) (rate(activation_provider_attempts_seconds_sum[5m]))
+/
+sum by (category) (rate(activation_provider_attempts_seconds_count[5m]))
+
+# Timeouts e retries por segundo.
+sum(rate(activation_provider_attempts_seconds_count{category="TIMEOUT"}[5m]))
+sum(rate(activation_provider_retries_total[5m]))
+
+# p95 aproximado: buckets em 0,1 / 0,5 / 1 / 2 / 5 / 10 segundos e +Inf.
+histogram_quantile(0.95, sum by (le) (rate(activation_provider_attempts_seconds_bucket[5m])))
+
+# Idade do snapshot em segundos, por instância; timestamp zero indica ausência de coleta.
+time() - activation_requests_snapshot_timestamp
+```
+
+O p95/p99 obtido por esses buckets é uma aproximação; valores acima de 10 segundos
+não têm resolução adicional. Histogramas de HTTP de entrada não são habilitados
+por esta tarefa. A instrumentação reutiliza as
+[métricas automáticas do Spring Boot 3.5](https://docs.spring.io/spring-boot/3.5/reference/actuator/metrics.html)
+e os [gauges do Micrometer](https://docs.micrometer.io/micrometer/reference/concepts/gauges.html).
+
+`ActivationMetricsIntegrationTests` combina PostgreSQL real, WireMock, worker,
+registry ativo e scrape via MockMvc para conferir duração, classificação, timeout,
+retries efetivos, totais após mudanças de estado e remoção de registros.
+`ActivationRequestStateMetricsTests` confere leitura sem SQL, falha inicial,
+preservação do snapshot, recuperação e indisponibilidade transacional.
+`PrometheusEndpointIntegrationTests`
+comprova HTTP/JVM/Hikari pelo endpoint HTTP real e mantém os testes de JWT/escopo.
+
+```bash
+./mvnw -B --no-transfer-progress \
+  -Dtest=ActivationMetricsIntegrationTests,ActivationRequestStateMetricsTests,PrometheusEndpointIntegrationTests test
 ```
 
 ## Documentação OpenAPI e Swagger UI
@@ -1258,6 +1789,7 @@ sem cookies de autenticação enviados automaticamente pelo navegador. CORS mant
 a integração padrão do Spring; nenhuma origem adicional é liberada nesta tarefa.
 
 As demais rotas exigem autenticação, incluindo Actuator sensível e Prometheus.
+Prometheus exige também o [escopo de monitoramento](#acesso-ao-prometheus).
 Swagger/OpenAPI e health/probes preservam o acesso público existente.
 No perfil `local`, o contrato de demonstração exige assinatura RS256, `iss`,
 `exp`, audience da API e `token_use=access`; valida `nbf` quando presente,
@@ -1273,8 +1805,10 @@ JWT em authorities com o prefixo `SCOPE_`: por exemplo,
 `scope="requests/read requests/write"` permite as três operações.
 Sem autenticação, a API responde `401`; com token válido sem o escopo exigido,
 responde `403` com Problem Details e desafio Bearer `insufficient_scope`.
-O token de demonstração local inclui os dois escopos na criação e na renovação.
-Os contratos de emissores externos dependem das próximas etapas.
+O token de consumidor da demonstração local inclui os dois escopos na criação
+e na renovação; `monitor-token` emite somente `monitoring/read` em outro arquivo.
+A integração com um emissor de produção requer validar seu contrato; emissor e
+cofre ainda não foram escolhidos.
 
 Veja [Configuração JWT e demonstração local](docs/resource-server.md) para variáveis
 de ambiente, JWKS, audience e geração de chave/token efêmeros fora do repositório.
@@ -1300,6 +1834,139 @@ Access Token local e sua geração/renovação:
 ```bash
 bash ./mvnw -Dtest=LocalAccessTokenValidationUnitTests,LocalAccessTokenMaterialUnitTests test
 ```
+
+## Análise de desempenho: cenário de lentidão
+
+O cenário da [SPEC-06](specs/06-observabilidade-e-producao.md#3-cenário-obrigatório-de-análise-no-readme)
+fornece os seguintes indicadores; eles não são resultados de um teste de carga
+executado neste projeto:
+
+| Indicador | Antes | Depois |
+| --- | --- | --- |
+| Latência da API | 300 ms | 2,5 s |
+| Algumas consultas ao banco | 50 ms | 1,2 s |
+| Latência do provedor externo | 400 ms | 3 s |
+| CPU | — | 45% |
+| Memória | — | 60% |
+
+CPU em 45% e memória em 60% não comprovam saturação desses recursos. Esperas por
+I/O, locks ou conexões podem aumentar a latência sem elevar essas médias; também
+é necessário verificar picos, limites do container e pausas da JVM.
+
+### 1. O que investigar primeiro?
+
+Delimitar o início da regressão e as rotas/instâncias afetadas, comparando tráfego,
+concorrência, volume de dados e mudanças recentes de código, configuração ou
+infraestrutura. Separar POST, consulta por ID e listagem; os valores fornecidos
+não informam rota nem percentil. Medir p50/p95/p99, vazão, erros/timeouts,
+tentativas, quantidade e idade do trabalho pendente e ocupação/espera dos pools.
+Comparar a linha de base com a mesma janela e perfil de carga antes de atribuir
+a causa ao banco ou ao provedor.
+
+### 2. Como separar aplicação, banco e provedor?
+
+Medir por etapa: duração HTTP na API, espera para adquirir conexão Hikari,
+execução SQL/commit no banco e duração HTTP do provedor no worker. O tempo de
+uma operação de repositório inclui mais que execução SQL; comparar essas medidas
+evita tratar espera por conexão como query lenta. No PostgreSQL, usar
+[`pg_stat_statements`](https://www.postgresql.org/docs/17/pgstatstatements.html)
+se habilitado, com deltas da janela do incidente, e examinar o plano das consultas
+afetadas com
+[`EXPLAIN (ANALYZE, BUFFERS)`](https://www.postgresql.org/docs/17/using-explain.html).
+`ANALYZE` executa a instrução: reproduzir em ambiente controlado com dados
+representativos, especialmente para escritas e consultas que adquirem locks.
+
+No código atual, `ActivationRequestService` delega a inserção/commit a
+`ActivationRequestCreationTransaction`; o POST responde sem chamar o provedor.
+`ActivationRequestWorker` faz claim e preparação em transações curtas, chama HTTP
+fora de transação e só depois persiste o resultado. Portanto, os 3 s do provedor
+não deveriam, sozinhos, atrasar o POST; podem atrasar a conclusão assíncrona.
+Confirmar essas fronteiras na versão em execução e investigar contenção em
+recursos compartilhados se a criação também ficar lenta. Não somar latências de
+operações assíncronas como se pertencessem ao mesmo caminho HTTP.
+
+### 3. Quais logs e métricas ajudam?
+
+Os eventos existentes `activation_attempt_started`, `activation_attempt_finished`
+e `activation_provider_attempt` permitem correlacionar execução e resultado por
+`correlationId`; incluem, conforme o evento, `requestId`, `attempt`, `durationMs`,
+`httpStatus`, `responseCategory`, `result` e `persistence`. A correlação vem do
+registro persistido e segue no header `X-Correlation-ID` até o provedor.
+
+Para o diagnóstico, coletar latência e erros por rota/status, conexões Hikari
+ativas/ociosas, espera de aquisição, threads pendentes e timeouts, além de JVM,
+GC e threads. A referência de
+[métricas do Spring Boot 3.5](https://docs.spring.io/spring-boot/3.5/reference/actuator/metrics.html)
+descreve `http.server.requests`, `jdbc.connections` e o prefixo `hikaricp`.
+No banco, examinar locks, transações longas, I/O e `wait_event` em
+[`pg_stat_activity`](https://www.postgresql.org/docs/17/monitoring-stats.html#MONITORING-PG-STAT-ACTIVITY-VIEW).
+Acrescentar duração por etapa, p95/p99 do provedor, erros/timeouts/retries por
+categoria e vazão/idade do backlog para distinguir espera de processamento.
+
+O [Prometheus com acesso restrito](#acesso-ao-prometheus) já publica HTTP/JVM/Hikari,
+latência/categoria/timeout/retry do provedor e totais por estado em cache,
+conforme as [métricas coletadas](#métricas-coletadas). O timer do provedor inclui
+buckets para percentis aproximados. Histogramas de entrada HTTP, duração por
+etapa e idade individual do backlog continuam como evoluções de diagnóstico.
+Logs JSON estão habilitados no profile `prod`; tracing distribuído continua pendente.
+Se tracing for adicionado, usar `traceId` e spans de entrada, banco e worker/HTTP
+externo; `correlationId` sozinho não fornece esses tempos. Proteger o acesso
+operacional, usar tags de baixa cardinalidade e manter IDs apenas em logs/traces,
+sem JWT, credenciais ou payloads sensíveis.
+
+### 4. Quais melhorias considerar conforme as evidências?
+
+Se o plano mostrar consultas caras, corrigir predicados/índices e estatísticas,
+incluindo claim e contagem da listagem, medindo o custo de escrita dos índices.
+Se houver locks/transações longas, reduzir sua duração e preservar a separação
+entre HTTP e transações já adotada. Se a espera estiver no pool, dimensionar
+conexões e concorrência pelo orçamento do PostgreSQL e pela quantidade de
+instâncias; aumentar o pool indiscriminadamente pode agravar a contenção.
+Se chegarem mais solicitações do que o worker consegue concluir, limitar a
+concorrência e planejar backpressure/admissão para conter o backlog, validando a
+capacidade do banco e do provedor antes de aumentar workers.
+
+Calibrar timeouts de conexão/leitura e lease com a latência observada e a margem
+para persistir o resultado. Timeout não prova ausência de ativação: preservar o
+bloqueio de reenvio de resultados ambíguos. Retries permanecem limitados a falhas
+comprovadamente seguras, com backoff/jitter e até três tentativas; não habilitar
+retry apenas por lentidão ou por HTTP 429/503.
+
+### 5. Qual hipótese poderia relacionar os sintomas?
+
+Uma hipótese verificável é: provedor lento reduz a vazão do worker; se a chegada
+superar essa vazão, o backlog cresce e consultas de claim/listagem podem ficar
+mais caras, disputar I/O/conexões com a API e elevar também o tempo do POST.
+Validar a sequência temporal entre duração externa, entrada/saída de trabalho,
+backlog, planos/tempo SQL, I/O e espera Hikari sob carga equivalente. Reproduzir
+com atraso controlado no WireMock e observar se o POST só degrada quando aparece
+essa contenção; se ela não aparecer, a hipótese não explica a demora da criação.
+
+Outra possibilidade seria uma regressão que mantivesse conexão/transação aberta
+durante o HTTP, causando retenção de conexões e locks. Isso contraria as fronteiras
+atuais e exige prova na versão implantada, por tempos de transação, atividade do
+banco e spans ou perfil de threads. Os números do cenário, isoladamente, não
+confirmam nenhuma dessas causas; rede ou armazenamento compartilhados também
+devem ser examinados conforme os sinais coletados.
+
+### 6. Como validar a correção e prever rollback?
+
+Registrar a linha de base e repetir a carga com as mesmas taxas de chegada,
+concorrência, mistura de rotas, massa de dados, recursos, aquecimento e perfil
+de latência/erros do provedor. Comparar p50/p95/p99 da API por rota, erros,
+latência SQL e externa, espera/ocupação do pool, locks, vazão e tamanho/idade do
+backlog. Definir antes os limites aceitáveis; os tempos iniciais são referência,
+não um SLO já validado. Confirmar que a melhora não veio de rejeitar mais tráfego
+ou apenas acumular trabalho pendente.
+
+Executar regressão funcional e de carga, incluindo provedor lento, indisponível
+e timeout; verificar resposta do POST independente do HTTP externo, progresso do
+worker e ausência de reenvio ambíguo. Após publicação, acompanhar esses mesmos
+indicadores em uma janela representativa. Manter versão/configuração anterior e
+gatilhos de rollback para piora de p95/p99, erros, pool ou backlog; para mudanças
+de schema, planejar compatibilidade com a versão anterior antes do rollout.
+Esta seção descreve o procedimento proposto, sem alegar incidente reproduzido,
+benchmark, correção operacional ou rollback já executados.
 
 ## Testes e integração contínua
 
@@ -1329,6 +1996,21 @@ MAVEN_OPTS='-Xmx256m -XX:MaxMetaspaceSize=192m' \
 
 Esses limites são das JVMs; o PostgreSQL do Testcontainers também consome RAM.
 
+`LayerArchitectureTests` usa ArchUnit sobre as classes de produção, incluindo
+subpacotes e sem importar classes de teste. As regras impedem dependências diretas
+de controllers em repositories e limitam `domain` ao Java e ao próprio domínio.
+As entidades de `model` não podem depender dos componentes de aplicação e
+infraestrutura; seus mapeamentos JPA e anotações de auditoria continuam permitidos.
+Essas regras complementam o isolamento do contrato do provedor em
+`ActivationProviderClientArchitectureTests` e a separação do fluxo de criação em
+`AsyncProviderFailureIsolationUnitTests`. Para executar as novas regras e a regra
+do contrato do provedor, sem Spring Boot, banco ou Docker:
+
+```bash
+./mvnw -B --no-transfer-progress \
+  -Dtest=LayerArchitectureTests,ActivationProviderClientArchitectureTests test
+```
+
 O teste `AtivaflowApiApplicationTests` verifica a inicialização do contexto com o
 perfil `test`, o acesso anônimo ao Swagger UI e seus recursos, os documentos
 OpenAPI, os metadados da API e a preservação das regras de acesso às demais rotas
@@ -1338,8 +2020,9 @@ imagem `postgres:17-alpine`, sem depender do banco ou das credenciais locais.
 servidor WireMock iniciado pelo próprio teste.
 `HttpActivationProviderClientTests` verifica o cliente real com WireMock em porta
 dinâmica: URL com prefixo, payload exato com Unicode e espaços, classificação de
-respostas, `Retry-After`, timeout de leitura, falha de conexão e ausência de retry
-ou redirecionamento automático. Também verifica rejeição de configuração inválida
+respostas, manutenção do bloqueio mesmo com `Retry-After`, timeout de leitura,
+falha de conexão e ausência de retry ou redirecionamento automático.
+Também verifica rejeição de configuração inválida
 na inicialização, sem exigir banco ou Compose.
 `HttpActivationProviderWireMockTests` testa isoladamente a fronteira HTTP do
 cliente, com WireMock em porta dinâmica e sem contexto Spring, banco, Docker ou
@@ -1362,8 +2045,9 @@ bash ./mvnw -B --no-transfer-progress \
 ```
 
 Essas quatro classes não iniciam contexto Spring, banco, servidor HTTP ou containers.
-O transporte simulado verifica uma única chamada e a classificação de `429/503`
-com `Retry-After` ausente, em segundos, data HTTP, inválido, negativo ou enorme.
+O transporte simulado verifica uma única chamada e a classificação padrão de `429/503`
+como indeterminados, sem interpretar `Retry-After` ausente, em segundos, data HTTP,
+inválido, negativo ou enorme.
 Exceções de timeout de conexão/leitura são injetadas, inclusive com causas aninhadas;
 o tempo real de expiração não é medido nesses testes unitários.
 Handler e serviços reais são exercitados com repositório simulado: resultados
@@ -1403,7 +2087,7 @@ Também verifica a rejeição individual dos campos controlados pelo servidor
 no payload de criação.
 `ActivationRequestMapperTests` usa `@JsonTest` com o mapper gerado e descoberto
 como bean Spring para verificar a conversão nos quatro estados, preservação
-dos valores e ausência dos oito metadados internos no JSON mesmo quando
+dos valores e ausência dos metadados internos no JSON mesmo quando
 preenchidos, além de entrada nula e datas anteriores à persistência, sem Docker.
 `ActivationRequestPersistenceTests` verifica o mapeamento completo
 contra as migrações no PostgreSQL, leitura dos quatro estados como texto,
@@ -1505,8 +2189,9 @@ tentativa nem a expiração do lease autorizam retry ou encerramento em `FAILED`
 Sem garantia documentada de idempotência ou consulta de reconciliação no provedor,
 a solicitação aguarda intervenção operacional; não há liberação automática.
 Se o worker perdeu a posse, a operação retorna `false` e mantém a proteção
-preventiva persistida antes do HTTP. O cliente HTTP e sua integração com essa
-operação continuam pendentes, conforme o [ADR-0001](docs/adr/0001-metadados-de-processamento.md).
+preventiva persistida antes do HTTP. O cliente HTTP retorna `Indeterminate`, e o worker usa
+`ActivationRequestOutcomeHandler` para encaminhar o resultado a essa operação,
+conforme o [ADR-0001](docs/adr/0001-metadados-de-processamento.md).
 `ActivationRequestAmbiguousOutcomeTests` verifica o bloqueio nas três tentativas,
 rejeição de escritas sem posse válida, resposta tardia após recuperação e commit
 independente no PostgreSQL real. A operação não expõe endpoint público.
@@ -1524,6 +2209,47 @@ serviços transacionais e PostgreSQL reais. Os cenários exigem `FAILED` na prim
 segunda e terceira tentativas, `PROVIDER_REJECTED` sem dados sensíveis, ausência de
 agendamento mesmo com `Retry-After` e nenhuma nova chamada por outro worker.
 A consulta pública deve mostrar `FAILED` sem expor a justificativa interna.
+O mesmo teste integrado verifica que HTTP `503` permanece em `PROCESSING`, exige
+reconciliação e não provoca nova chamada no contrato padrão. O scheduler fica desligado nesse teste;
+o worker é invocado explicitamente.
+
+`HttpActivationProviderRetryTests` cobre o contrato seguro selecionado, interpretação
+de segundos/data HTTP, header ausente, inválido, zero, passado, repetido e enorme,
+rejeição de configuração desconhecida e preservação das demais classificações.
+`ActivationRequestHttpRetryTests` combina WireMock, worker e PostgreSQL reais:
+prazo mínimo persistido, bloqueio de outro worker antes do prazo, backoff positivo,
+três chamadas efetivas até `FAILED`, conclusão após retry e bloqueio em timeout
+ou overflow. Reutiliza o cenário JSON opcional, com scheduler desligado e Awaitility
+para conduzir o worker após os prazos reais, sem adiantar o relógio por SQL.
+
+```bash
+./mvnw -B --no-transfer-progress \
+  -Dtest=HttpActivationProviderRetryTests,ActivationRequestHttpRetryTests test
+```
+
+`ActivationRequestProcessingIntegrationTests` cobre POST/commit, scheduler e worker
+ativos, HTTP real com WireMock, persistência e GET para sucesso (`204`), `500` e
+read timeout. Uma barreira no transporte mantém o envio bloqueado até o POST
+responder `201`; verifica também ausência de transação na chamada externa e
+visibilidade dos commits por outra conexão. Awaitility acompanha a gravação do
+resultado e confirma que novas rodadas do scheduler não reenviam a solicitação.
+O teste confere payload e correlação enviados ao provedor.
+
+`ActivationRequestSchedulerRestartTests` fecha e recria contextos completos da
+aplicação mantendo o mesmo PostgreSQL. A primeira instância, com scheduler
+desligado, deixa um `PENDING`, um claim vencido seguro e uma tentativa preparada
+com resultado desconhecido. A nova instância habilita o scheduler e conclui
+automaticamente os dois trabalhos seguros, sem liberar o bloqueio de reconciliação.
+Uma terceira instância preserva os estados e a contagem de chamadas ao provedor.
+Esses testes usam identidades simuladas do Spring Security; a validação de JWT
+permanece nas suítes específicas de segurança.
+
+Para executar somente as duas suítes de processamento integrado e restart:
+
+```bash
+bash ./mvnw -B --no-transfer-progress \
+  -Dtest=ActivationRequestProcessingIntegrationTests,ActivationRequestSchedulerRestartTests test
+```
 
 Também é possível executar a aplicação com o PostgreSQL do Testcontainers e o
 perfil `test` por meio de `TestAtivaflowApiApplication`:
@@ -1534,4 +2260,17 @@ bash ./mvnw spring-boot:test-run
 
 O workflow `.github/workflows/ci.yaml` executa `verify` em Ubuntu com Java 21
 Temurin e cache Maven, em pushes e pull requests destinados às branches `main`
-e `develop`.
+e `develop`. Antes dos testes, `docker info` confirma o acesso ao Docker usado
+pelo Testcontainers; a suíte inclui integração com PostgreSQL e HTTP no WireMock,
+sem exigir subida manual do Compose. Somente após o `verify` aprovado, o mesmo
+job executa `docker build --tag ativaflow-api:${{ github.sha }} .` com o Dockerfile
+do projeto. Uma falha nos testes impede esse build. A imagem recebe o SHA da
+revisão executada como tag e fica no runner, sem publicação em registry ou deploy.
+
+Para conferir a execução remota, abra **Actions → AtivaFlow CI** no GitHub e
+selecione a execução correspondente à revisão desejada. Confira o SHA, o resultado
+do job **Build and Tests**, a execução dos testes de integração no log de
+**Build and run tests** e o sucesso de **Build Docker image**. Em pull requests,
+o SHA executado pode ser o commit de merge criado pelo GitHub. O YAML e os testes
+locais, por si só, não comprovam essa execução; o registro da evidência de A12
+fica em [PENDING_ACTIONS.md](PENDING_ACTIONS.md#a12--completar-e-comprovar-ci).

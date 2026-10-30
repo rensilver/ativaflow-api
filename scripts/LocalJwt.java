@@ -14,7 +14,7 @@ import java.time.Instant;
 import java.util.Arrays;
 import java.util.Base64;
 
-/** Utilitário independente para desenvolvimento: java scripts/LocalJwt.java create|token. */
+/** Utilitário independente para desenvolvimento: java scripts/LocalJwt.java create|token|monitor-token. */
 public class LocalJwt {
 
     public static void main(String[] args) throws Exception {
@@ -40,17 +40,21 @@ public class LocalJwt {
                     export SPRING_SECURITY_OAUTH2_RESOURCESERVER_JWT_PUBLICKEYLOCATION=%s
                     unset SPRING_SECURITY_OAUTH2_RESOURCESERVER_JWT_JWKSETURI
                     """.formatted(shellQuote(directory.resolve("public.pem").toUri().toString())));
-            token(directory, "demo-consumer");
+            token(directory, "demo-consumer", "requests/read requests/write", "authorization.header");
             // Apenas o caminho sai no console; o Bearer permanece em arquivo protegido.
             System.out.println(directory);
         } else if ((args.length == 2 || args.length == 3) && args[0].equals("token")) {
-            token(outsideGit(Path.of(args[1])), args.length == 3 ? args[2] : "demo-consumer");
+            token(outsideGit(Path.of(args[1])), args.length == 3 ? args[2] : "demo-consumer",
+                    "requests/read requests/write", "authorization.header");
+        } else if (args.length == 2 && args[0].equals("monitor-token")) {
+            token(outsideGit(Path.of(args[1])), "prometheus", "monitoring/read", "monitoring.header");
         } else {
-            throw new IllegalArgumentException("Usage: java scripts/LocalJwt.java create | token <directory> [consumer]");
+            throw new IllegalArgumentException(
+                    "Usage: java scripts/LocalJwt.java create | token <directory> [consumer] | monitor-token <directory>");
         }
     }
 
-    private static void token(Path directory, String consumer) throws Exception {
+    private static void token(Path directory, String consumer, String scope, String headerFile) throws Exception {
         if (!consumer.matches("[A-Za-z0-9][A-Za-z0-9._@-]{0,99}")) {
             throw new IllegalArgumentException("Consumer must contain 1-100 characters: letters, digits, '.', '_', '@', '-'");
         }
@@ -60,13 +64,13 @@ public class LocalJwt {
         long now = Instant.now().getEpochSecond();
         String header = "{\"alg\":\"RS256\",\"typ\":\"JWT\",\"kid\":\"" + kid(publicKey) + "\"}";
         String claims = """
-                {"iss":"https://ativaflow.local","sub":"%s","aud":"ativaflow-api","token_use":"access","scope":"requests/read requests/write","iat":%d,"nbf":%d,"exp":%d}
-                """.formatted(consumer, now, now - 5, now + 300).strip();
+                {"iss":"https://ativaflow.local","sub":"%s","aud":"ativaflow-api","token_use":"access","scope":"%s","iat":%d,"nbf":%d,"exp":%d}
+                """.formatted(consumer, scope, now, now - 5, now + 300).strip();
         String payload = encode(header.getBytes(StandardCharsets.UTF_8)) + "." + encode(claims.getBytes(StandardCharsets.UTF_8));
         var signer = Signature.getInstance("SHA256withRSA");
         signer.initSign(privateKey);
         signer.update(payload.getBytes(StandardCharsets.US_ASCII));
-        write(directory.resolve("authorization.header"), "Authorization: Bearer " + payload + "." + encode(signer.sign()) + "\n");
+        write(directory.resolve(headerFile), "Authorization: Bearer " + payload + "." + encode(signer.sign()) + "\n");
     }
 
     private static Path outsideGit(Path path) throws Exception {

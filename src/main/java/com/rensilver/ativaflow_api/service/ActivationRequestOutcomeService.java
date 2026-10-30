@@ -1,10 +1,14 @@
 package com.rensilver.ativaflow_api.service;
 
 import java.time.Instant;
+import java.util.Map;
+import java.util.Objects;
 
+import com.rensilver.ativaflow_api.observability.AfterCommitLog;
 import com.rensilver.ativaflow_api.repository.ActivationRequestRepository;
 import com.rensilver.ativaflow_api.service.model.PreparedActivationAttempt;
 import com.rensilver.ativaflow_api.service.policy.ActivationRetryPolicy;
+import lombok.extern.slf4j.Slf4j;
 import org.springframework.lang.Nullable;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Propagation;
@@ -12,6 +16,7 @@ import org.springframework.transaction.annotation.Transactional;
 
 /** Persiste resultados conhecidos em transações curtas; não classifica HTTP nem chama o provedor. */
 @Service
+@Slf4j
 public class ActivationRequestOutcomeService {
 
 	private final ActivationRequestRepository repository;
@@ -35,7 +40,7 @@ public class ActivationRequestOutcomeService {
 
 	/**
 	 * Exige garantia de não ativação externa; HTTP 500/503, timeout e Retry-After sozinhos não a comprovam.
-	 * retryAfter é o instante mínimo já interpretado pela futura integração HTTP.
+	 * retryAfter é o instante mínimo já interpretado pela integração HTTP.
 	 * Retorna false quando a posse/versão não permite gravar; não autoriza reenviar nesse caso.
 	 */
 	@Transactional(propagation = Propagation.REQUIRES_NEW)
@@ -54,6 +59,14 @@ public class ActivationRequestOutcomeService {
 		}
 		if (affectedRows != 1) {
 			throw new IllegalStateException("Confirmed outcome must update exactly one activation request");
+		}
+		if (retryable && !success && attempt.attemptCount() < retryPolicy.maxAttempts()) {
+			// Relê o prazo calculado pelo PostgreSQL, incluindo backoff/jitter e Retry-After.
+			repository.findById(attempt.id()).ifPresent(request -> AfterCommitLog.info(log,
+					"activation_retry_scheduled", Map.of(
+							"requestId", request.getId(), "attempt", request.getAttemptCount(),
+							"nextAttemptAt", Objects.requireNonNull(request.getNextAttemptAt()),
+							"correlationId", AfterCommitLog.correlationId(request.getId(), request.getCorrelationId()))));
 		}
 		return true;
 	}

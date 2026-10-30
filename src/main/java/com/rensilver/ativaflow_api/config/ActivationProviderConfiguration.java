@@ -3,6 +3,9 @@ package com.rensilver.ativaflow_api.config;
 import java.net.http.HttpClient;
 
 import com.rensilver.ativaflow_api.client.provider.HttpActivationProviderClient;
+import io.micrometer.core.instrument.MeterRegistry;
+import io.micrometer.core.instrument.composite.CompositeMeterRegistry;
+import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.boot.context.properties.EnableConfigurationProperties;
 import org.springframework.boot.http.client.ClientHttpRequestFactoryBuilder;
 import org.springframework.boot.http.client.ClientHttpRequestFactorySettings;
@@ -16,7 +19,8 @@ public class ActivationProviderConfiguration {
 
 	@Bean
 	HttpActivationProviderClient activationProviderClient(RestClient.Builder builder,
-			ActivationProviderProperties properties, ClientHttpRequestFactorySettings settings) {
+			ActivationProviderProperties properties, ClientHttpRequestFactorySettings settings,
+			ObjectProvider<MeterRegistry> registries) {
 		var providerSettings = settings
 				.withConnectTimeout(properties.connectTimeout())
 				.withReadTimeout(properties.readTimeout())
@@ -29,7 +33,8 @@ public class ActivationProviderConfiguration {
 				.baseUrl(properties.baseUrl().toString())
 				.requestFactory(requestFactory)
 				.build();
-		return new HttpActivationProviderClient(restClient);
+		return new HttpActivationProviderClient(restClient, properties.retryContract(),
+				registries.getIfAvailable(CompositeMeterRegistry::new));
 	}
 
 }

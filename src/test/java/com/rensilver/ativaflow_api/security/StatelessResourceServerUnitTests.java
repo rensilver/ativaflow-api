@@ -46,6 +46,7 @@ import org.springframework.web.context.support.StaticWebApplicationContext;
 import org.springframework.web.cors.UrlBasedCorsConfigurationSource;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static com.rensilver.ativaflow_api.support.RequestLimitTestFilters.disabledRateLimitFilter;
 
 /** Contrato HTTP da configuração real, com filtros e JWT assinado, sem Boot, banco ou rede. */
 class StatelessResourceServerUnitTests {
@@ -80,7 +81,8 @@ class StatelessResourceServerUnitTests {
 				.securityContext(Customizer.withDefaults()).requestCache(Customizer.withDefaults())
 				.anonymous(Customizer.withDefaults()).exceptionHandling(Customizer.withDefaults())
 				.logout(Customizer.withDefaults()).servletApi(Customizer.withDefaults());
-		filters = new FilterChainProxy(new SecurityConfiguration().securityFilterChain(http, new SecurityProblemHandler(mapper)));
+		filters = new FilterChainProxy(new SecurityConfiguration()
+				.securityFilterChain(http, new SecurityProblemHandler(mapper), disabledRateLimitFilter()));
 	}
 
 	@AfterEach

@@ -17,7 +17,14 @@ public record ActivationProviderProperties(URI baseUrl,
 		@DefaultValue("2s") @NotNull @DurationMin(millis = 1) @DurationMax(millis = Integer.MAX_VALUE)
 		Duration connectTimeout,
 		@DefaultValue("5s") @NotNull @DurationMin(millis = 1) @DurationMax(millis = Integer.MAX_VALUE)
-		Duration readTimeout) {
+		Duration readTimeout,
+		@DefaultValue("NONE") @NotNull RetryContract retryContract) {
+
+	/** Somente selecionar após confirmar que 429/503 não ativam nem enfileiram trabalho remoto. */
+	public enum RetryContract {
+		NONE,
+		REJECTED_BEFORE_ACTIVATION
+	}
 
 	public ActivationProviderProperties {
 		if (baseUrl == null || !("http".equalsIgnoreCase(baseUrl.getScheme())

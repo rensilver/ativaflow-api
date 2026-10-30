@@ -26,7 +26,7 @@ public final class CorrelationId {
 	}
 
 	/** Restaura o contexto anterior, inclusive em caso de exceção. */
-	public static Scope withId(String value) {
+	public static Scope withId(@Nullable String value) {
 		return new Scope(value);
 	}
 
@@ -35,8 +35,13 @@ public final class CorrelationId {
 		@Nullable
 		private final String previous = MDC.get(MDC_KEY);
 
-		private Scope(String value) {
-			MDC.put(MDC_KEY, value);
+		private Scope(@Nullable String value) {
+			if (value == null) {
+				MDC.remove(MDC_KEY);
+			}
+			else {
+				MDC.put(MDC_KEY, value);
+			}
 		}
 
 		@Override

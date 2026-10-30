@@ -1,18 +1,101 @@
 # ADR-0001 — Contrato dos metadados persistidos de processamento
 
-Data: 2026-10-29. Decisão: aceita para orientar a implementação do processamento.
+Data: 2026-10-29. Decisão: aceita e aplicada ao processamento implementado.
 
 ## Contexto e alcance
 
 A tabela `activation_requests` já contém os metadados internos na migração V2,
 mapeados por `model.ActivationRequest`. Esta decisão define sua semântica e o
-protocolo que o worker deverá cumprir. As operações implementadas de claim,
-preparação, resultado e recuperação e as etapas pendentes estão descritas ao final
-desta decisão. A persistência existente ainda não garante o protocolo completo de envio.
+protocolo cumprido pelo worker e pelos serviços de claim, preparação, resultado
+e recuperação. Scheduler, cliente HTTP e gravação dos resultados estão implementados;
+as evidências e limitações estão descritas ao final desta decisão. A proteção
+persistida impede reenvios ambíguos, mas não garante idempotência no provedor.
 
 Os estados públicos continuam `PENDING`, `PROCESSING`, `COMPLETED` e `FAILED`.
 Espera por retry e resultado indeterminado permanecem em `PROCESSING`. Os campos
 abaixo não entram nos DTOs públicos e não podem ser recebidos do consumidor.
+
+## Decisão de processamento assíncrono persistido
+
+**Contexto:** a ativação depende de HTTP externo sujeito a lentidão, timeout e
+queda do processo. A criação precisa confirmar o trabalho local sem esperar essa
+dependência e permitir retomada após reinício.
+
+**Decisão:** persistir a solicitação em `PENDING` e confirmar sua transação antes
+do processamento. O POST retorna `201 Created`, `Location` e a fotografia da
+criação; isso confirma persistência, sem prometer ativação concluída. O worker
+com `@Scheduled`, habilitado por padrão, consulta o PostgreSQL, adquire claim e
+prepara a tentativa em transações curtas próprias. O HTTP ocorre fora de transação;
+o resultado é gravado em outra transação condicional à posse e versão válidas.
+O protocolo detalhado nas próximas seções é parte desta decisão.
+
+**Alternativas consideradas:**
+
+| Alternativa | Motivo para não adotar nesta etapa |
+| --- | --- |
+| Chamar o provedor durante o POST | Acopla o tempo de resposta à dependência externa; manter a transação aberta durante o HTTP também reteria recursos do banco. |
+| Usar somente `@Async`, executor ou evento em memória | O trabalho pode desaparecer na queda do processo; o commit precisa deixar uma pendência recuperável sem depender de uma notificação em memória. |
+| Introduzir broker e publicação de mensagens | Acrescenta infraestrutura e coordenação entre commit e publicação. O polling do trabalho já persistido atende o escopo atual sem essa segunda escrita. |
+
+**Consequências:** criação e conclusão têm tempos distintos; o consumidor consulta
+o estado por GET. O polling acrescenta consultas ao banco e espera até a próxima
+busca. Persistir a pendência permite retomada após restart, mas exige claim,
+lease, versão e proteção preventiva para não reenviar resultados desconhecidos.
+Uma falha depois da preparação pode reter trabalho mesmo sem envio efetivo;
+sem reconciliação automática, essa retenção exige intervenção operacional.
+Não há garantia de efeito externo exatamente uma vez.
+
+Rastreabilidade: [SPEC-03](../../specs/03-integracao-provedor.md),
+[criação no README](../../README.md#criação-de-solicitações),
+`ActivationRequestProcessingIntegrationTests` (commit, scheduler, HTTP fora de
+transação e GET) e `ActivationRequestSchedulerRestartTests` (retomada segura e
+preservação do bloqueio de reconciliação).
+
+## Decisão de duplicidade e idempotência local
+
+**Contexto:** repetir um POST após perder sua resposta não deve criar outra
+solicitação. Consultas prévias podem disputar com outras inserções, inclusive em
+instâncias distintas. A unicidade de `externalId` é global, enquanto o acesso à
+representação pertence ao consumidor autenticado.
+
+**Decisão:** usar a constraint `uk_activation_requests_external_id`, criada na
+V1, como garantia de unicidade. A consulta prévia é uma otimização. A inserção
+ocorre em `ActivationRequestCreationTransaction` com `REQUIRES_NEW`; se perder
+a disputa por essa constraint, termina com rollback antes de reler o vencedor
+em nova transação. Outras violações de integridade não são tratadas como repetição.
+
+| Situação | Resposta e efeito local |
+| --- | --- |
+| `externalId` novo | `201 Created` e `Location`; uma nova solicitação persistida. |
+| Mesmo `externalId`, consumidor, `customerId` e `productCode` | `200 OK` com a representação atual, em qualquer dos quatro estados; sem nova linha, reinício ou tentativa adicional causada pela repetição. |
+| Mesmo `externalId` com conteúdo divergente ou outro consumidor | `409 Conflict` genérico; sem alterar o registro nem revelar a representação ou o proprietário alheio. |
+
+A comparação preserva caixa e espaços, sem normalização. Uma repetição mantém
+ID, datas, correlação e metadados; o worker pode avançar o trabalho original
+independentemente dela. O `Location` acompanha somente a criação.
+
+**Alternativas consideradas:** confiar apenas em consulta seguida de inserção
+deixa uma janela de corrida; `synchronized` protege somente a mesma JVM;
+`@Version` protege atualizações, sem impedir inserções com UUIDs diferentes.
+Tornar a chave única por consumidor contraria a unicidade global prevista na
+[SPEC-02](../../specs/02-duplicidade-e-concorrencia.md). Rejeitar toda repetição
+com `409` impediria recuperar a representação de um pedido idêntico após perda
+da resposta; sobrescrever o payload ou reiniciar o processamento poderia mudar
+uma ativação já iniciada.
+
+**Consequências:** a API reutiliza o efeito local mesmo em criações concorrentes,
+mas depende do PostgreSQL e do tratamento correto da fronteira transacional.
+O conflito genérico informa indisponibilidade do identificador sem expor dados
+do outro consumidor. Outro `externalId` cria outra solicitação, mesmo com cliente
+e produto iguais. Essa idempotência local não deduplica ativações no provedor:
+não há `Idempotency-Key` contratado ou enviado. Claim e lease coordenam posse
+local, mas não comprovam ausência de efeito remoto após uma falha; aplica-se o
+bloqueio conservador descrito nesta decisão e na [ADR-0002](0002-contrato-minimo-provedor.md).
+
+Rastreabilidade: [duplicidade no README](../../README.md#idempotência-da-api-e-idempotência-da-operação-externa),
+`CreateActivationRequestEndpointTests` (repetição, divergência, isolamento por
+consumidor e corrida pela constraint), `ActivationRequestClaimTests` e
+`ActivationRequestAmbiguousOutcomeTests` (posse e proteção contra reenvio ambíguo).
 
 ## Dicionário persistido
 
@@ -76,8 +159,11 @@ Resultado indeterminado permanece em `PROCESSING`, mesmo na terceira tentativa.
 O backoff inicia em 1 s, dobra por tentativa e limita a base a 1 min, com jitter
 adicional de até 25%, configuráveis em `app.worker.retry`. O jitter não reduz a
 base; o atraso deve ter pelo menos 1 ms. `Retry-After` é recebido como `Instant`
-opcional e funciona como limite mínimo, sem reduzir o backoff. Sua interpretação
-e a classificação de respostas HTTP serão definidas na integração.
+opcional e funciona como limite mínimo, sem reduzir o backoff. O cliente HTTP
+classifica as respostas conforme a [ADR-0002](0002-contrato-minimo-provedor.md).
+Por padrão, `429/503` permanecem indeterminados. Somente o contrato opt-in
+`rejected-before-activation` autoriza `TransientFailure` e interpretação de
+`Retry-After`; exige garantia de que não houve ativação nem trabalho remoto pendente.
 
 ## Elegibilidade, posse e recuperação
 
@@ -97,8 +183,9 @@ após a preparação nunca torna a linha elegível para envio automático.
 Seleção e claim devem ser atômicos entre instâncias, por exemplo com
 `FOR UPDATE SKIP LOCKED` e atualização na mesma transação. O worker só prossegue
 se uma linha for efetivamente adquirida. Usar o relógio do banco para as
-comparações e atribuições de lease no SQL; duração e tamanho de lote serão
-configurações do worker. Não manter locks durante o HTTP.
+comparações e atribuições de lease no SQL. A duração é configurada por
+`app.worker.lease-duration`; o serviço interno de recuperação recebe o limite
+do lote como argumento. Não manter locks durante o HTTP.
 
 Toda preparação, renovação e gravação de resultado deve verificar `id`, status
 `PROCESSING`, `claimed_by`, versão esperada e lease ainda válido. Cada mutação
@@ -183,8 +270,9 @@ provedor. Portanto, resultado ambíguo permanece bloqueado para intervenção
 operacional, sem prazo de liberação automática. `external_id` único protege a
 criação local, mas não comprova idempotência do efeito externo. Expiração de
 lease, reinício, `Retry-After` e limite de tentativas não removem esse bloqueio.
-Uma futura integração HTTP deve registrar timeout de conexão/leitura e qualquer
-resposta sem certeza do efeito externo por essa operação, sem agendar retry.
+O cliente HTTP classifica timeout de conexão/leitura e respostas sem certeza do
+efeito externo como `Indeterminate`. O worker encaminha esse resultado pelo
+`ActivationRequestOutcomeHandler` a essa operação, sem agendar retry.
 
 `ActivationRequestLeaseRecoveryService.recoverExpiredLeases` libera somente posse
 vencida com reenvio comprovadamente seguro, em lotes, com CTE, `FOR UPDATE SKIP
@@ -228,7 +316,19 @@ vencimento exato do lease, liberação e commit independente em PostgreSQL real.
 Os testes unitários cobrem a política de atraso, sua configuração, validação dos
 códigos de erro e contagens de linhas inesperadas.
 
-HTTP real, renovação de lease e reconciliação continuam pendentes.
+`ActivationRequestWorker` está habilitado por padrão e usa `@Scheduled` para
+buscar trabalho persistido. `poll()` e `processNext()` suspendem transações
+chamadoras com `NOT_SUPPORTED`; claim e preparação confirmam suas transações
+antes da chamada a `HttpActivationProviderClient`. O handler encaminha sucesso,
+rejeição permanente, falha transitória segura e resultado indeterminado aos
+serviços correspondentes. O cliente produz falha transitória segura para `429/503`
+somente com o contrato de rejeição antes da ativação selecionado explicitamente.
+O claim retoma diretamente trabalho seguro com lease vencido; o serviço de
+recuperação explícita não possui scheduler próprio.
+
+Renovação de lease e reconciliação automática continuam pendentes. O lease não
+é estendido durante o HTTP: uma resposta após seu vencimento não pode ser gravada
+como resultado confirmado, e a proteção preventiva preserva a ambiguidade.
 As demais relações entre colunas não possuem enforcement completo
 no banco ou nos métodos da entidade. Os métodos atuais
 `startProcessing()`, `complete()` e `fail()` cuidam das transições básicas;
@@ -237,7 +337,17 @@ não implementam o protocolo de posse e envio desta decisão.
 Os testes existentes `FlywayMigrationTests`, `ActivationRequestPersistenceTests`,
 `ActivationRequestTests` e `ActivationRequestMapperTests` verificam schema,
 mapeamento, defaults, auditoria, lock otimista e isolamento dos campos públicos.
-Esses testes não comprovam o fluxo completo do worker. As próximas etapas
-deverão testar classificação de respostas, interpretação de `Retry-After`,
-timeout real e ausência de reenvio em resultado
-indeterminado no fluxo HTTP completo, com PostgreSQL real.
+Esses testes não comprovam o fluxo completo do worker.
+`HttpActivationProviderClientTests` e `HttpActivationProviderWireMockTests`
+cobrem a fronteira HTTP com WireMock, incluindo timeout de leitura real e
+classificação conservadora, inclusive na presença de `Retry-After`.
+`ActivationRequestWorkerTests` verifica a orquestração e a suspensão de transação
+com dependências simuladas. `ActivationRequestProviderRejectionTests` combina
+worker, cliente HTTP, WireMock e PostgreSQL para `400` e `503`, com scheduler
+desligado e contrato padrão conservador. `ActivationRequestProcessingIntegrationTests`
+reúne criação/commit, scheduler/worker, HTTP real e GET para sucesso, `500` e timeout;
+`ActivationRequestSchedulerRestartTests` cobre retomada com scheduler ativo,
+conforme [A04](../../PENDING_ACTIONS.md#a04--completar-a-evidência-do-processamento-integrado).
+`HttpActivationProviderRetryTests` e `ActivationRequestHttpRetryTests` cobrem
+interpretação de `Retry-After` no contrato opt-in e seu efeito no agendamento,
+nas chamadas efetivas e no limite de três tentativas.

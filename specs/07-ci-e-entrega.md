@@ -21,12 +21,10 @@ ativaflow-api/
 │   ├── 06-observabilidade-e-producao.md
 │   └── 07-ci-e-entrega.md
 ├── docs/adr/
-│   ├── 0001-processamento-assincrono.md
-│   ├── 0002-duplicidade-e-idempotencia.md
-│   ├── 0003-integracao-wiremock.md
-│   └── 0004-resiliencia-sem-circuit-breaker.md
+│   ├── 0001-metadados-de-processamento.md
+│   └── 0002-contrato-minimo-provedor.md
 ├── .github/workflows/ci.yaml
-├── AGENTS.md
+├── PENDING_ACTIONS.md
 ├── README.md
 ├── Dockerfile
 ├── .dockerignore
@@ -35,7 +33,7 @@ ativaflow-api/
 └── mvnw / .mvn/
 ```
 
-O HTML exige `/src`, README, Maven/Gradle e `Dockerfile`; `docker-compose.yaml` e `/docs/adr` são diferenciais. `specs/`, `AGENTS.md` e `infra/wiremock` são escolhas do projeto.
+O HTML exige `/src`, README, Maven/Gradle e `Dockerfile`; `docker-compose.yaml` e `/docs/adr` são diferenciais. `specs/`, `PENDING_ACTIONS.md` e `infra/wiremock` são escolhas do projeto. A estrutura acima usa os nomes dos ADRs existentes; os critérios abaixo continuam sendo requisitos, não prova de entrega.
 
 ## 2. GitHub Actions — diferencial CI (sem CD obrigatório)
 
@@ -76,17 +74,17 @@ README em **português brasileiro**, com comandos que realmente funcionam em clo
 
 Em `docs/adr/` usar arquivos curtos, numerados e consistentes com o código **real**:
 
-- `0001-processamento-assincrono.md`: por que API não espera provedor; worker persistente, recovery e limitações.
-- `0002-duplicidade-e-idempotencia.md`: constraint, transações, concorrência entre instâncias e limites de idempotência do provedor.
-- `0003-integracao-wiremock.md`: mock por contrato, separação infraestrutura/domínio, tipos sealed, testes isolados.
-- `0004-resiliencia-sem-circuit-breaker.md`: timeouts/retries/backoff e por que não iniciar com Resilience4j; critérios para mudança em produção.
+- `0001-metadados-de-processamento.md`: protocolo persistido, worker assíncrono, transações, concorrência, recovery e limites de idempotência.
+- `0002-contrato-minimo-provedor.md`: contrato HTTP/mock, isolamento do cliente, timeouts/retries/backoff e limitações do provedor.
+
+Preservar a numeração e os links existentes. A consolidação das alternativas e consequências de processamento assíncrono, duplicidade/idempotência, WireMock e ausência de Circuit Breaker está prevista em A13 de `PENDING_ACTIONS.md`; não criar quatro ADRs redundantes apenas para atender nomes de um planejamento anterior.
 
 Template de ADR: **Status**, **Contexto**, **Decisão**, **Alternativas consideradas**, **Consequências/limitações**. Não gerar decisões fictícias ou contraditórias com a implementação.
 
 ## 5. Git e transparência do uso de IA
 
 - Commits pequenos e intencionais (p.ex. `feat(domain): ...`, `test(concurrency): ...`, `docs(adr): ...`) com teste/regressão a cada fase; não gerar um commit final monolítico.
-- SDD: `AGENTS.md` orienta o Codex; `specs/` define tarefas e aceite; o desenvolvedor revisa as mudanças e valida criticamente concorrência, segurança e domínio.
+- SDD: `specs/` define tarefas e aceite; `PENDING_ACTIONS.md` registra as lacunas confrontadas com código e testes. Não há arquivo `AGENTS.md` neste checkout. Seguir as instruções fornecidas na sessão e registrar evidências; a revisão humana de concorrência, segurança e domínio é requisito de entrega e só pode ser declarada após confirmação.
 - Documentar uso de IA como ferramenta efetiva no processo, **sem esconder contribuição e sem atribuir a si revisões que não ocorreram**.
 - Não modificar arquivos não relacionados, não incluir prompts com dados sensíveis e não declarar sucesso sem executar os comandos.
 

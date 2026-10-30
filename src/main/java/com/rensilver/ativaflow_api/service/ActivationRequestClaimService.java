@@ -1,12 +1,15 @@
 package com.rensilver.ativaflow_api.service;
 
 import java.time.Duration;
+import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
 
 import com.rensilver.ativaflow_api.config.ActivationRetryProperties;
+import com.rensilver.ativaflow_api.observability.AfterCommitLog;
 import com.rensilver.ativaflow_api.repository.ActivationRequestRepository;
 import com.rensilver.ativaflow_api.service.model.ClaimedActivationRequest;
+import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.boot.context.properties.EnableConfigurationProperties;
 import org.springframework.lang.Nullable;
@@ -17,6 +20,7 @@ import org.springframework.transaction.annotation.Transactional;
 /** Adquire uma solicitação por transação; o retorno só é entregue após o commit pelo proxy Spring. */
 @Service
 @EnableConfigurationProperties(ActivationRetryProperties.class)
+@Slf4j
 public class ActivationRequestClaimService {
 
 	private final ActivationRequestRepository repository;
@@ -54,6 +58,11 @@ public class ActivationRequestClaimService {
 		}
 		// O update nativo limpou o contexto JPA: a releitura contém a versão e o lease persistidos.
 		var claimed = repository.findById(request.getId()).orElseThrow();
+		AfterCommitLog.info(log, "activation_request_claimed", Map.of(
+				"requestId", claimed.getId(), "attempt", claimed.getAttemptCount(),
+				"leaseUntil", Objects.requireNonNull(claimed.getLeaseUntil()),
+				"recovered", request.getLeaseUntil() != null,
+				"correlationId", AfterCommitLog.correlationId(claimed.getId(), claimed.getCorrelationId())));
 		return Optional.of(new ClaimedActivationRequest(claimed.getId(),
 				Objects.requireNonNull(claimed.getVersion()), workerId, Objects.requireNonNull(claimed.getLeaseUntil())));
 	}
