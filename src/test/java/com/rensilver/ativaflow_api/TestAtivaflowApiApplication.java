@@ -1,5 +1,6 @@
 package com.rensilver.ativaflow_api;
 
+import com.rensilver.ativaflow_api.support.TestcontainersConfiguration;
 import org.springframework.boot.SpringApplication;
 
 public class TestAtivaflowApiApplication {

@@ -1,9 +1,10 @@
-package com.rensilver.ativaflow_api;
+package com.rensilver.ativaflow_api.observability;
 
 import java.sql.SQLException;
 
 import javax.sql.DataSource;
 
+import com.rensilver.ativaflow_api.support.TestcontainersConfiguration;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;

@@ -1,4 +1,4 @@
-package com.rensilver.ativaflow_api;
+package com.rensilver.ativaflow_api.model;
 
 import java.time.Clock;
 import java.time.Instant;
@@ -6,8 +6,8 @@ import java.time.OffsetDateTime;
 import java.time.ZoneId;
 import java.util.UUID;
 
+import com.rensilver.ativaflow_api.support.TestcontainersConfiguration;
 import com.rensilver.ativaflow_api.domain.ActivationStatus;
-import com.rensilver.ativaflow_api.model.ActivationRequest;
 import jakarta.persistence.EntityManager;
 import jakarta.persistence.EntityManagerFactory;
 import jakarta.persistence.OptimisticLockException;

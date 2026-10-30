@@ -1,11 +1,10 @@
-package com.rensilver.ativaflow_api;
+package com.rensilver.ativaflow_api.controller;
 
 import java.net.SocketTimeoutException;
 import java.time.Instant;
 import java.util.Optional;
 
 import com.rensilver.ativaflow_api.client.provider.HttpActivationProviderClient;
-import com.rensilver.ativaflow_api.controller.ActivationRequestController;
 import com.rensilver.ativaflow_api.exception.ApiExceptionHandler;
 import com.rensilver.ativaflow_api.mapper.ActivationRequestMapper;
 import com.rensilver.ativaflow_api.model.ActivationRequest;

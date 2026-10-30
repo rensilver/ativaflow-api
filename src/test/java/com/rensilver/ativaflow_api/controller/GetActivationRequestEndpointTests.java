@@ -1,8 +1,9 @@
-package com.rensilver.ativaflow_api;
+package com.rensilver.ativaflow_api.controller;
 
 import java.time.OffsetDateTime;
 import java.util.UUID;
 
+import com.rensilver.ativaflow_api.support.TestcontainersConfiguration;
 import com.rensilver.ativaflow_api.domain.ActivationStatus;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;

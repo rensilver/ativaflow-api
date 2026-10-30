@@ -1,5 +1,7 @@
-package com.rensilver.ativaflow_api;
+package com.rensilver.ativaflow_api.integration;
 
+import com.rensilver.ativaflow_api.AtivaflowApiApplication;
+import com.rensilver.ativaflow_api.support.TestcontainersConfiguration;
 import java.time.Duration;
 import java.util.UUID;
 

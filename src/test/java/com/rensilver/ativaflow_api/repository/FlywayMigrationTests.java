@@ -1,9 +1,10 @@
-package com.rensilver.ativaflow_api;
+package com.rensilver.ativaflow_api.repository;
 
 import java.sql.SQLException;
 import java.time.OffsetDateTime;
 import java.util.UUID;
 
+import com.rensilver.ativaflow_api.support.TestcontainersConfiguration;
 import org.flywaydb.core.Flyway;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;

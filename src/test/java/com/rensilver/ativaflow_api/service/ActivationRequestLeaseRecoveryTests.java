@@ -1,4 +1,4 @@
-package com.rensilver.ativaflow_api;
+package com.rensilver.ativaflow_api.service;
 
 import java.time.Instant;
 import java.time.OffsetDateTime;
@@ -9,10 +9,9 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 
+import com.rensilver.ativaflow_api.support.TestcontainersConfiguration;
 import com.rensilver.ativaflow_api.config.JpaAuditingConfiguration;
 import com.rensilver.ativaflow_api.repository.ActivationRequestRepository;
-import com.rensilver.ativaflow_api.service.ActivationRequestClaimService;
-import com.rensilver.ativaflow_api.service.ActivationRequestLeaseRecoveryService;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;

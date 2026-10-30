@@ -1,4 +1,4 @@
-package com.rensilver.ativaflow_api;
+package com.rensilver.ativaflow_api.integration;
 
 import java.io.IOException;
 import java.nio.file.Files;
@@ -10,6 +10,7 @@ import java.util.UUID;
 import com.github.tomakehurst.wiremock.client.ResponseDefinitionBuilder;
 import com.github.tomakehurst.wiremock.junit5.WireMockExtension;
 import com.github.tomakehurst.wiremock.stubbing.StubMapping;
+import com.rensilver.ativaflow_api.support.TestcontainersConfiguration;
 import com.rensilver.ativaflow_api.client.provider.ActivationProviderClient;
 import com.rensilver.ativaflow_api.domain.ActivationStatus;
 import com.rensilver.ativaflow_api.model.ActivationRequest;

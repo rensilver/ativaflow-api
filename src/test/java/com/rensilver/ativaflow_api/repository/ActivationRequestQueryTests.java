@@ -1,13 +1,13 @@
-package com.rensilver.ativaflow_api;
+package com.rensilver.ativaflow_api.repository;
 
 import java.util.ArrayList;
 import java.util.List;
 import java.util.UUID;
 
+import com.rensilver.ativaflow_api.support.TestcontainersConfiguration;
 import com.rensilver.ativaflow_api.config.JpaAuditingConfiguration;
 import com.rensilver.ativaflow_api.domain.ActivationStatus;
 import com.rensilver.ativaflow_api.model.ActivationRequest;
-import com.rensilver.ativaflow_api.repository.ActivationRequestRepository;
 import org.hibernate.resource.jdbc.spi.StatementInspector;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
@@ -32,7 +32,7 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 @Import({TestcontainersConfiguration.class, JpaAuditingConfiguration.class})
 @DataJpaTest(properties = {
 		"spring.jpa.properties.hibernate.session_factory.statement_inspector="
-				+ "com.rensilver.ativaflow_api.ActivationRequestQueryTests$SqlCapture"
+				+ "com.rensilver.ativaflow_api.repository.ActivationRequestQueryTests$SqlCapture"
 }, showSql = false)
 @AutoConfigureTestDatabase(replace = AutoConfigureTestDatabase.Replace.NONE)
 @ActiveProfiles("test")

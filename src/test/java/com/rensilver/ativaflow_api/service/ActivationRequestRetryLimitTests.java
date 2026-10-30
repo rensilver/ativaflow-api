@@ -1,13 +1,11 @@
-package com.rensilver.ativaflow_api;
+package com.rensilver.ativaflow_api.service;
 
 import java.util.UUID;
 
+import com.rensilver.ativaflow_api.support.TestcontainersConfiguration;
 import com.rensilver.ativaflow_api.config.JpaAuditingConfiguration;
 import com.rensilver.ativaflow_api.model.ActivationRequest;
 import com.rensilver.ativaflow_api.repository.ActivationRequestRepository;
-import com.rensilver.ativaflow_api.service.ActivationRequestAttemptService;
-import com.rensilver.ativaflow_api.service.ActivationRequestClaimService;
-import com.rensilver.ativaflow_api.service.ActivationRequestOutcomeService;
 import com.rensilver.ativaflow_api.service.policy.ActivationRetryPolicy;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;

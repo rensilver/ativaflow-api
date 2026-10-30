@@ -1,4 +1,4 @@
-package com.rensilver.ativaflow_api;
+package com.rensilver.ativaflow_api.integration;
 
 import java.io.IOException;
 import java.time.Duration;
@@ -9,6 +9,7 @@ import java.util.concurrent.TimeUnit;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.github.tomakehurst.wiremock.junit5.WireMockExtension;
+import com.rensilver.ativaflow_api.support.TestcontainersConfiguration;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.extension.RegisterExtension;
