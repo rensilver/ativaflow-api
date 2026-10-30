@@ -173,7 +173,7 @@ de serviços está em [Responsabilidades dos serviços](docs/service-responsibil
 | `.env.example` | Modelo de variáveis para execução local. |
 | `docker-compose.yaml` | API, PostgreSQL com volume persistente e provedor simulado WireMock. |
 | `infra/wiremock/mappings/activation-success.json` | Mapping estático de sucesso: `POST /provider/v1/activate` retorna `204`, sem corpo. |
-| `.github/workflows/ci.yaml` | Build e testes no GitHub Actions. |
+| `.github/workflows/ci.yaml` | Build, testes e imagem Docker no GitHub Actions. |
 | `.gitignore` | Exclusões de build, arquivos de IDE e configurações locais de ambiente. |
 | `.gitattributes` | Padronização de finais de linha dos scripts do Maven Wrapper. |
 
@@ -2245,4 +2245,17 @@ bash ./mvnw spring-boot:test-run
 
 O workflow `.github/workflows/ci.yaml` executa `verify` em Ubuntu com Java 21
 Temurin e cache Maven, em pushes e pull requests destinados às branches `main`
-e `develop`.
+e `develop`. Antes dos testes, `docker info` confirma o acesso ao Docker usado
+pelo Testcontainers; a suíte inclui integração com PostgreSQL e HTTP no WireMock,
+sem exigir subida manual do Compose. Somente após o `verify` aprovado, o mesmo
+job executa `docker build --tag ativaflow-api:${{ github.sha }} .` com o Dockerfile
+do projeto. Uma falha nos testes impede esse build. A imagem recebe o SHA da
+revisão executada como tag e fica no runner, sem publicação em registry ou deploy.
+
+Para conferir a execução remota, abra **Actions → AtivaFlow CI** no GitHub e
+selecione a execução correspondente à revisão desejada. Confira o SHA, o resultado
+do job **Build and Tests**, a execução dos testes de integração no log de
+**Build and run tests** e o sucesso de **Build Docker image**. Em pull requests,
+o SHA executado pode ser o commit de merge criado pelo GitHub. O YAML e os testes
+locais, por si só, não comprovam essa execução; o registro da evidência de A12
+fica em [PENDING_ACTIONS.md](PENDING_ACTIONS.md#a12--completar-e-comprovar-ci).

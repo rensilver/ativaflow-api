@@ -50,7 +50,7 @@ Responder **brevemente e com hipóteses verificáveis**:
 - **Múltiplas instâncias:** constraint global PostgreSQL + claim atômico/leases; não confiar em mutex local; idempotência externa requer suporte do provedor.
 - **Configurações e segredos:** variáveis de ambiente e secret store gerenciado (p.ex. AWS Secrets Manager), permissões mínimas e rotação.
 - **Eventos de ativação:** quando necessário, publicar evento em fila/tópico; para consistência entre commit do DB e publicação, considerar **Transactional Outbox** e consumo idempotente, sem implementar mensageria no take-home.
-- **CI/CD futuro:** build e testes → imagem Docker → registry → deploy progressivo/rollback e monitoramento; a CI atual só testa e empacota.
+- **CI/CD futuro:** build e testes → imagem Docker → registry → deploy progressivo/rollback e monitoramento; o workflow atual testa, empacota e faz o build local da imagem no runner. Publicação em registry e deploy continuam como evolução.
 - **Produção:** banco gerenciado, rede privada, TLS, métricas, secrets, escalabilidade e read/write probes; listar riscos e passos, sem declarar que deploy foi realizado.
 
 ## 6. Critérios de aceite

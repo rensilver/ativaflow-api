@@ -30,5 +30,11 @@ jobs:
           java-version: '21'
           cache: maven
 
+      - name: Check Docker for integration tests
+        run: docker info
+
       - name: Build and run tests
         run: bash ./mvnw -B --no-transfer-progress verify
+
+      - name: Build Docker image
+        run: docker build --tag ativaflow-api:${{ github.sha }} .
