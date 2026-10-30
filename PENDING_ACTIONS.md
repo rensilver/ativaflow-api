@@ -69,11 +69,13 @@ Revisão de `CHECKLIST.md` confrontada com código, testes, configurações, REA
 
 ### A05 — Validação final das alterações
 
-- [ ] **[P0] Executar `./mvnw -B --no-transfer-progress verify` após as mudanças** e conferir os relatórios, incluindo integração com PostgreSQL. Repetir cenários apenas quando alterações ou sinais de instabilidade justificarem.
+- [x] **[P0] Executar `./mvnw -B --no-transfer-progress verify` após as mudanças** e conferir os relatórios, incluindo integração com PostgreSQL. Execução de A05 aprovada com 953 testes em 60 relatórios, sem falhas, erros ou ignorados; evidências na seção 4. Repetir cenários apenas quando alterações ou sinais de instabilidade justificarem.
 - [ ] **[P0] Conferir o contrato com o HTML original disponível ao responsável**, além das SPECs, e realizar revisão humana dos fluxos críticos. Não é possível declarar essa conferência concluída apenas com os arquivos atuais.
-- [ ] **[P0] Revisar o conteúdo versionado e o pacote final** para evitar inclusão de material JWT efêmero, `.env` e outros segredos. O utilitário local e o `.gitignore` já oferecem a base; isso é conferência final, não nova funcionalidade.
+- [x] **[P0] Revisar o conteúdo versionado e o pacote final** para evitar inclusão de material JWT efêmero, `.env` e outros segredos. Conferidos os 177 arquivos versionados e o JAR gerado pelo `verify`, além das regras de ignore e da configuração por ambiente; escopo e limites da inspeção na seção 4.
 
-**Origem:** 05.23–05.25, 07.26–07.30 e FINAL.01–FINAL.05. O resultado da execução feita nesta revisão está na seção 4.
+**Dependência externa:** A05 permanece parcialmente concluída. Nenhum HTML original foi localizado no checkout e não há confirmação de revisão humana de domínio, concorrência e segurança. O responsável deve confrontar o enunciado original com as SPECs e revisar os fluxos críticos antes de marcar o segundo item. A validação automatizada não substitui essas duas conferências.
+
+**Origem:** 05.23–05.25, 07.26–07.30 e FINAL.01–FINAL.05. O resultado mais recente e o histórico da revisão estão na seção 4.
 
 ## 2. Diferenciais ainda incompletos
 
@@ -159,10 +161,28 @@ Esta tabela explica o que foi retirado da lista de desenvolvimento pendente. Ela
 
 ## 4. Evidência de execução desta revisão
 
+### Validação mais recente — A05 (29/10/2026)
+
+Base de código validada: `4891717` (`testes do processamento integrado`). Nesta tarefa, somente este documento foi alterado.
+
+**Comando:** `./mvnw -B --no-transfer-progress verify`. A primeira tentativa no sandbox foi interrompida antes dos testes por falta de acesso de escrita ao lock do cache Maven em `~/.m2`. A execução seguinte, com acesso ao cache e ao Docker, terminou com **`BUILD SUCCESS`: 953 testes, 0 falhas, 0 erros e 0 ignorados**. As 60 classes concluídas no log correspondem exatamente aos 60 relatórios XML em `target/surefire-reports/`, cujos totais foram somados e conferidos.
+
+**Integração:** confirmada a inicialização de PostgreSQL 17 via Testcontainers. Entre os relatórios aprovados estão `ActivationRequestProcessingIntegrationTests` (3 casos), `ActivationRequestSchedulerRestartTests` (1), `FlywayMigrationTests` (18) e `ResourceServerSecurityConfigurationUnitTests` (19). Não houve necessidade de repetir a suíte nem os cenários de containers já demonstrados em A01.
+
+**Conteúdo versionado:** inspecionados os 177 arquivos listados por `git ls-files`. Nenhum arquivo `.env` real, chave/certificado em arquivo, `authorization.header`, `env.sh` ou saída de `target/` está versionado. A busca por padrões de chave privada PEM, JWT assinado, access key AWS e token GitHub não encontrou ocorrências. Os campos de senha e API key de `.env.example` estão vazios; os YAMLs da aplicação e do Compose recebem os segredos por variáveis de ambiente. Os exemplos e fixtures consultados usam placeholders ou material gerado durante os testes. `git check-ignore --no-index` confirmou sete caminhos representativos de `.env`, `.env.*` e `target/`, mantendo `.env.example` versionável.
+
+**Pacote final:** inspecionado `target/ativaflow-api-0.0.1-SNAPSHOT.jar`, produzido nesta execução, com 78 entradas de aplicação e 97 dependências. Nenhum arquivo de chave, `.env`, header Bearer ou JWKS local foi encontrado na listagem; a mesma busca por padrões de credenciais nas entradas da aplicação não encontrou ocorrências. Os oito recursos de `src/main/resources/` correspondem byte a byte aos empacotados. Manifesto executável confirmado; classes de teste, dependências de teste verificadas (JUnit, Mockito, Testcontainers, WireMock e ArchUnit) e DevTools ausentes. JAR e relatórios permanecem ignorados, sem inclusão no commit.
+
+**Limites:** esta inspeção cobre os arquivos versionados atuais e as entradas da aplicação no JAR; não é auditoria de todo o histórico Git nem do conteúdo interno das dependências de terceiros. Não houve nova execução de imagem/Compose ou consulta à CI remota nesta tarefa; a evidência anterior de containers está em A01 e a execução remota continua em A12. A conferência com o HTML original e a revisão humana continuam pendentes em A05.
+
+### Histórico — revisão original anterior à correção de A00
+
+Os resultados abaixo registram a falha original, já corrigida em A00; não representam o estado da validação mais recente.
+
 Comando executado: `./mvnw -B --no-transfer-progress verify`, com acesso ao cache Maven e Docker para Testcontainers.
 
 **Resultado: `BUILD FAILURE`, 949 testes, 0 falhas de asserção, 15 erros, 0 ignorados.** Os 58 relatórios em `target/surefire-reports/` totalizam 934 casos sem falha/erro e os 15 erros de `ResourceServerSecurityConfigurationUnitTests` descritos em A00. Houve execução de integração com PostgreSQL real; não se trata de suíte inteira pendente de configuração. Os relatórios são artefatos locais, não devem ser versionados.
 
 **Reprodução isolada:** `./mvnw -B --no-transfer-progress -Dtest=ResourceServerSecurityConfigurationUnitTests test` também terminou com `BUILD FAILURE`: 19 casos, os mesmos 15 erros e nenhum ignorado. Nenhum código da aplicação ou dos testes foi alterado nesta revisão.
 
-Não foram executados build de imagem, subida do Compose completo nem demonstração da API em containers: Dockerfile e os serviços `app`/PostgreSQL ainda não existem. Isso permanece como trabalho de A01, sem impedir a avaliação dos testes independentes do Compose.
+Na revisão original, não foram executados build de imagem, subida do Compose completo nem demonstração da API em containers, pois Dockerfile e os serviços `app`/PostgreSQL ainda não existiam. Esses itens foram implementados e validados posteriormente em A01.
