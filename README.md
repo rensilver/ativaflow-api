@@ -27,10 +27,10 @@ um resultado externo indeterminado permanece em `PROCESSING` e bloqueia reenvio.
 | Situação | Implementação, evidência ou limite |
 | --- | --- |
 | Implementado | API, validação e Problem Details; JWT/escopos/BOLA; unicidade global e repetição 201/200/409; worker, HTTP e persistência de resultados; Dockerfile e Compose. |
-| Cobertura automatizada existente | Testes de endpoints e concorrência com PostgreSQL/Testcontainers, autorização, cliente HTTP com WireMock, orquestração e recuperação. O perfil `test` desliga o scheduler; as evidências específicas estão em [Testes e integração contínua](#testes-e-integração-contínua). |
+| Cobertura automatizada existente | Testes de endpoints e concorrência com PostgreSQL/Testcontainers, autorização, cliente HTTP com WireMock, orquestração e recuperação. As suítes integradas de processamento e restart habilitam o scheduler explicitamente; as demais usam o padrão desligado do perfil `test`. Evidências em [Testes e integração contínua](#testes-e-integração-contínua). |
 | Demonstração documentada | [Roteiro completo](docs/container-image.md#demonstração-autenticada-e-retomada-de-pendências) de JWT, POST/GET, chamada ao mock e retomada de `PENDING` após recriação com volume persistente. A execução registrada em [A01](PENDING_ACTIONS.md#a01--empacotamento-e-execução-reproduzível) não substitui testes automatizados com scheduler ativo. |
 | Limitações da integração | Sem idempotência garantida pelo provedor, reconciliação automática ou renovação de lease. `429/503` e timeouts são indeterminados; o cliente não habilita retry HTTP nem interpreta `Retry-After`. |
-| Próximas evoluções | Completar testes integrados de sucesso/500/timeout e retomada pelo scheduler; limites de body/tráfego; probes explícitas, Prometheus, métricas de negócio, logs JSON e tracing opcional. Detalhes e prioridades em [Ações pendentes](PENDING_ACTIONS.md). |
+| Próximas evoluções | Limites de body/tráfego; probes explícitas, Prometheus, métricas de negócio, logs JSON e tracing opcional. Detalhes e prioridades em [Ações pendentes](PENDING_ACTIONS.md). |
 
 ## Roteiro curto de uso
 
@@ -1797,10 +1797,31 @@ agendamento mesmo com `Retry-After` e nenhuma nova chamada por outro worker.
 A consulta pública deve mostrar `FAILED` sem expor a justificativa interna.
 O mesmo teste integrado verifica que HTTP `503` permanece em `PROCESSING`, exige
 reconciliação e não provoca nova chamada. O scheduler fica desligado nesse teste;
-o worker é invocado explicitamente. A cobertura conjunta com criação/commit,
-HTTP real e GET para sucesso, `500` e timeout, e a retomada automática com scheduler
-habilitado ainda precisam ser acrescentadas, conforme
-[A04](PENDING_ACTIONS.md#a04--completar-a-evidência-do-processamento-integrado).
+o worker é invocado explicitamente.
+
+`ActivationRequestProcessingIntegrationTests` cobre POST/commit, scheduler e worker
+ativos, HTTP real com WireMock, persistência e GET para sucesso (`204`), `500` e
+read timeout. Uma barreira no transporte mantém o envio bloqueado até o POST
+responder `201`; verifica também ausência de transação na chamada externa e
+visibilidade dos commits por outra conexão. Awaitility acompanha a gravação do
+resultado e confirma que novas rodadas do scheduler não reenviam a solicitação.
+O teste confere payload e correlação enviados ao provedor.
+
+`ActivationRequestSchedulerRestartTests` fecha e recria contextos completos da
+aplicação mantendo o mesmo PostgreSQL. A primeira instância, com scheduler
+desligado, deixa um `PENDING`, um claim vencido seguro e uma tentativa preparada
+com resultado desconhecido. A nova instância habilita o scheduler e conclui
+automaticamente os dois trabalhos seguros, sem liberar o bloqueio de reconciliação.
+Uma terceira instância preserva os estados e a contagem de chamadas ao provedor.
+Esses testes usam identidades simuladas do Spring Security; a validação de JWT
+permanece nas suítes específicas de segurança.
+
+Para executar somente as duas suítes de processamento integrado e restart:
+
+```bash
+bash ./mvnw -B --no-transfer-progress \
+  -Dtest=ActivationRequestProcessingIntegrationTests,ActivationRequestSchedulerRestartTests test
+```
 
 Também é possível executar a aplicação com o PostgreSQL do Testcontainers e o
 perfil `test` por meio de `TestAtivaflowApiApplication`:
