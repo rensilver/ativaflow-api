@@ -35,7 +35,7 @@ public class ActivationRequestOutcomeService {
 
 	/**
 	 * Exige garantia de não ativação externa; HTTP 500/503, timeout e Retry-After sozinhos não a comprovam.
-	 * retryAfter é o instante mínimo já interpretado pela futura integração HTTP.
+	 * retryAfter é o instante mínimo já interpretado pela integração HTTP.
 	 * Retorna false quando a posse/versão não permite gravar; não autoriza reenviar nesse caso.
 	 */
 	@Transactional(propagation = Propagation.REQUIRES_NEW)

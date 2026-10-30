@@ -29,7 +29,7 @@ public class ActivationProviderConfiguration {
 				.baseUrl(properties.baseUrl().toString())
 				.requestFactory(requestFactory)
 				.build();
-		return new HttpActivationProviderClient(restClient);
+		return new HttpActivationProviderClient(restClient, properties.retryContract());
 	}
 
 }

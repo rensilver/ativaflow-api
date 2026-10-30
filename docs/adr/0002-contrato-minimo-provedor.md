@@ -6,9 +6,10 @@ Data: 2026-10-29. Decisão: aceita e aplicada à integração HTTP e ao mock.
 
 A SPEC-03 exige `POST /provider/v1/activate`, mas registra que o enunciado não
 fornece schema completo de entrada e saída. Não existe contrato oficial adicional.
-Os campos JSON, o retorno `204` e a ausência de ativação nos cenários de erro
-do mock abaixo são **suposições do projeto confirmadas com o responsável**.
-Não representam garantias de um provedor real.
+Os campos JSON, o retorno `204` e a rejeição permanente `400` sem ativação
+são **suposições do projeto confirmadas com o responsável**. O contrato opcional
+de rejeição antes da ativação em `429/503` é uma suposição técnica explicitamente
+selecionável para o mock. Nenhum desses cenários representa garantia de um provedor real.
 
 Esta decisão define o protocolo da chamada de saída do AtivaFlow, implementado
 por `HttpActivationProviderClient`, `ActivationProviderRequest` e
@@ -87,7 +88,8 @@ da classificação. Não persistir nem registrar a resposta bruta.
 | `202 Accepted` | Apenas aceitação; não confirma conclusão. Está fora do retorno de sucesso contratado. | `PROCESSING`, `reconciliation_required=true`; sem reenvio automático. |
 | `400 Bad Request` | No mock, rejeição permanente da entrada antes de qualquer ativação. | `FAILED`; sem retry. |
 | `500 Internal Server Error` | O status não confirma se o produto foi ativado. | `PROCESSING` com reconciliação; sem reenvio automático. |
-| `429 Too Many Requests` ou `503 Service Unavailable` | O status, por si só, não comprova que a ativação não ocorreu. O mock pode simular essa garantia, mas a URL configurada não identifica nem valida esse contrato. | `PROCESSING`, `reconciliation_required=true`; sem reenvio automático. |
+| `429 Too Many Requests` ou `503 Service Unavailable`, contrato `none` (padrão) | Status e header não comprovam ausência de ativação. | `PROCESSING`, `reconciliation_required=true`; sem reenvio automático. |
+| `429/503`, contrato `rejected-before-activation` selecionado explicitamente | Garantia de rejeição antes de ativar ou enfileirar trabalho remoto. | `TransientFailure`: `PROCESSING` com próximo prazo; esgotar o limite de tentativas confirmadas encerra em `FAILED`. Prazo não representável bloqueia o reenvio. |
 | Timeout de conexão/leitura, conexão interrompida ou ausência de resposta confiável | Efeito externo desconhecido. | `PROCESSING`, `reconciliation_required=true`; sem reenvio automático, inclusive na terceira tentativa. |
 | Demais respostas não contratadas, incluindo outros `2xx` e redirecionamentos, ou erro de provedor real sem garantia contratual de não ativação | Evidência insuficiente sobre o efeito externo. | `PROCESSING`, `reconciliation_required=true`; sem reenvio automático; revisar o contrato para classificar com segurança. |
 
@@ -97,12 +99,22 @@ ainda não concluído ([RFC 9110, seção 15.3.3](https://www.rfc-editor.org/rfc
 O mock padrão usa `204`. Nenhum endpoint de consulta externa ou callback
 é presumido para resolver `202` ou timeout.
 
-A garantia de não ativação que o mock pode simular em `429/503` não é inferida
-pelo cliente HTTP: a configuração de URL não prova que o endpoint implementa
-esse contrato. O cliente trata esses status como indeterminados até existir uma
-garantia explícita e selecionada para a integração real. O `500` também é
-indeterminado, pois pode ocorrer após a ativação. Corpo vazio e `Retry-After`
-isoladamente não provam ausência de ativação.
+A garantia de não ativação não é inferida da URL ou do header. A propriedade
+`app.activation-provider.retry-contract`, exposta por
+`ACTIVATION_PROVIDER_RETRY_CONTRACT`, aceita `none` (padrão) e
+`rejected-before-activation`. Valores desconhecidos impedem a inicialização.
+O modo opt-in declara que **todas** as respostas `429/503` do endpoint rejeitam
+antes de qualquer ativação ou enfileiramento remoto. Ele só deve ser selecionado
+para um provedor real após confirmar essa garantia. O `500` continua indeterminado
+em ambos os modos; corpo vazio e `Retry-After` isoladamente não liberam retry.
+
+O cenário [activation-rejected-before-activation.json](../../infra/wiremock/scenarios/activation-rejected-before-activation.json)
+simula esse contrato: rejeita com `503`, sem ativar ou manter trabalho remoto,
+e pede 120 segundos antes do próximo envio. Fica fora de `mappings/` para não
+conflitar com o sucesso padrão. A carga explícita pela API administrativa e a
+restauração estão no [README](../../README.md#habilitar-retry-http-no-contrato-seguro).
+Os testes isolados também simulam `429` com a mesma garantia. Isso demonstra a
+suposição do mock, sem atestar comportamento de um serviço real.
 
 ## Retry e resultado indeterminado
 
@@ -111,14 +123,25 @@ falhas comprovadamente seguras. Cada tentativa envia os mesmos três valores.
 Não fazer retry implícito na biblioteca HTTP nem seguir redirecionamentos
 automaticamente; o agendamento persistido controla os novos envios.
 
-Somente após a integração comprovar contratualmente a não ativação, um retry
-seguro poderá aceitar `Retry-After` como segundos inteiros não negativos ou data
+Com o contrato seguro selecionado, o cliente interpreta `Retry-After` como
+segundos inteiros não negativos ou data
 HTTP, conforme a [RFC 9110, seção 10.2.3](https://www.rfc-editor.org/rfc/rfc9110.html#section-10.2.3).
 O próximo instante é o maior entre o backoff com jitter e o prazo válido do header,
 conforme o serviço existente. Header ausente, inválido ou data passada não elimina
 o backoff positivo. Não antecipar uma data futura válida para caber no teto do
-backoff. Se o prazo não puder ser representado com segurança, não reenviar antes
-dele: preservar a pendência para análise operacional.
+backoff. Segundos são contados a partir da interpretação da resposta, sem usar
+o relógio remoto. Datas HTTP são interpretadas pelo parser de `HttpHeaders`.
+O limite operacional é `9999-12-31T23:59:59Z`, inferior aos limites de
+`Instant` e PostgreSQL. Overflow numérico, instante além desse limite ou headers
+repetidos produzem `Indeterminate("PROVIDER_RETRY_AFTER_UNSUPPORTED")`;
+preservam a pendência para análise operacional, sem truncar nem antecipar o prazo.
+Header ausente ou malformado produz `Optional.empty()` e mantém o backoff positivo.
+Não persistir ou registrar o header bruto.
+
+Alternativas descartadas: inferir garantia pela URL de localhost, habilitar retry
+por status/header isolados ou presumir idempotência externa. Um contrato enumerado
+e conservador por padrão torna a garantia selecionada explícita sem alterar a
+porta de domínio, o protocolo de persistência ou a biblioteca HTTP.
 
 Timeouts configurados atualmente: conexão `2s` e leitura `5s`, alteráveis por
 `ACTIVATION_PROVIDER_CONNECT_TIMEOUT` e `ACTIVATION_PROVIDER_READ_TIMEOUT`.
@@ -149,16 +172,21 @@ iniciam WireMock isolado e cobrem payload, sucesso `200/201/204`, rejeição `40
 respostas indeterminadas, timeout de leitura e ausência de reenvio automático.
 `HttpActivationProviderCorrelationTests` verifica propagação da correlação e
 ausência do JWT na saída com transporte simulado. Os testes de `429/503` com
-`Retry-After` comprovam que o header não libera retry; não demonstram sua interpretação.
+`Retry-After` comprovam que o header não libera retry no contrato padrão.
 `ActivationRequestProviderRejectionTests` combina worker, HTTP real, WireMock e
 PostgreSQL para `400/503`, sem scheduler. Os testes de persistência de resultados
 e ambiguidade verificam o limite de tentativas e o bloqueio de reenvio no banco.
 
 A cobertura conjunta de criação/commit → worker → HTTP → estado persistido/GET
-para sucesso, `500` e timeout, e a retomada com scheduler habilitado continuam em
+para sucesso, `500` e timeout, e a retomada com scheduler habilitado estão em
 [A04](../../PENDING_ACTIONS.md#a04--completar-a-evidência-do-processamento-integrado).
-O cliente atual não interpreta `Retry-After` em segundos/data HTTP nem produz
-`TransientFailure`; esse diferencial depende de contrato seguro e implementação
-em [A06](../../PENDING_ACTIONS.md#a06--retry-http-seguro-e-retry-after).
+`HttpActivationProviderRetryTests` cobre contrato opt-in, segundos/data HTTP,
+header ausente, inválido, zero, passado, repetido e enorme, além da preservação
+das demais classificações. `ActivationRequestHttpRetryTests` combina worker,
+WireMock e PostgreSQL reais: prazo mínimo persistido, bloqueio antes do prazo,
+backoff positivo, três chamadas efetivas até `FAILED`, sucesso após retry e
+bloqueio em timeout ou overflow. O cenário JSON de demonstração é reutilizado
+nessa suíte. O scheduler fica desligado; Awaitility conduz o worker conforme
+o prazo real no banco, sem adiantar agendamentos por SQL.
 Não há operação automática de reconciliação nem teste que possa comprovar
 idempotência de um provedor real sem contrato correspondente.

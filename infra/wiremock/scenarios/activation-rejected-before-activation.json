@@ -1,0 +1,14 @@
+{
+  "name": "activation-rejected-before-activation",
+  "priority": 1,
+  "request": {
+    "method": "POST",
+    "url": "/provider/v1/activate"
+  },
+  "response": {
+    "status": 503,
+    "headers": {
+      "Retry-After": "120"
+    }
+  }
+}

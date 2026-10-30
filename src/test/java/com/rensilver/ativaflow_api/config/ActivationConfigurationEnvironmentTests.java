@@ -22,6 +22,7 @@ class ActivationConfigurationEnvironmentTests {
 						new SystemEnvironmentPropertySource("activation-test-env", Map.of(
 								"ACTIVATION_PROVIDER_CONNECT_TIMEOUT", "350ms",
 								"ACTIVATION_PROVIDER_READ_TIMEOUT", "750ms",
+								"ACTIVATION_PROVIDER_RETRY_CONTRACT", "rejected-before-activation",
 								"WORKER_RETRY_MAX_ATTEMPTS", "1",
 								"WORKER_RETRY_INITIAL_DELAY", "250ms",
 								"WORKER_RETRY_MAX_DELAY", "400ms",
@@ -34,6 +35,7 @@ class ActivationConfigurationEnvironmentTests {
 					var provider = context.getBean(ActivationProviderProperties.class);
 					assertThat(provider.connectTimeout()).isEqualTo(Duration.ofMillis(350));
 					assertThat(provider.readTimeout()).isEqualTo(Duration.ofMillis(750));
+					assertThat(provider.retryContract()).isEqualTo(ActivationProviderProperties.RetryContract.REJECTED_BEFORE_ACTIVATION);
 					var retry = context.getBean(ActivationRetryProperties.class);
 					assertThat(retry.maxAttempts()).isEqualTo(1);
 					assertThat(retry.maxDelay()).isEqualTo(Duration.ofMillis(400));

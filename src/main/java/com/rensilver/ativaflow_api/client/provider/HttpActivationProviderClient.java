@@ -2,13 +2,19 @@ package com.rensilver.ativaflow_api.client.provider;
 
 import java.net.SocketTimeoutException;
 import java.net.http.HttpTimeoutException;
+import java.time.DateTimeException;
+import java.time.Instant;
+import java.util.Objects;
+import java.util.Optional;
 import java.util.concurrent.TimeUnit;
 
 import com.rensilver.ativaflow_api.client.provider.dto.ActivationProviderRequest;
+import com.rensilver.ativaflow_api.config.ActivationProviderProperties.RetryContract;
 import com.rensilver.ativaflow_api.domain.ProviderOutcome;
 import com.rensilver.ativaflow_api.observability.CorrelationId;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.http.HttpHeaders;
 import org.springframework.http.MediaType;
 import org.springframework.web.client.RestClient;
 import org.springframework.web.client.RestClientException;
@@ -17,11 +23,19 @@ import org.springframework.web.client.RestClientException;
 public class HttpActivationProviderClient implements ActivationProviderClient {
 
 	private static final Logger log = LoggerFactory.getLogger(HttpActivationProviderClient.class);
+	// Faixa operacional deliberadamente menor que Instant/PostgreSQL, sem truncar prazos maiores.
+	private static final Instant MAX_RETRY_AT = Instant.parse("9999-12-31T23:59:59Z");
 
 	private final RestClient restClient;
+	private final RetryContract retryContract;
 
 	public HttpActivationProviderClient(RestClient restClient) {
+		this(restClient, RetryContract.NONE);
+	}
+
+	public HttpActivationProviderClient(RestClient restClient, RetryContract retryContract) {
 		this.restClient = restClient;
+		this.retryContract = Objects.requireNonNull(retryContract);
 	}
 
 	@Override
@@ -48,6 +62,7 @@ public class HttpActivationProviderClient implements ActivationProviderClient {
 							case 200, 201, 204 -> new ProviderOutcome.Success();
 							// Rejeição contratual definitiva: código interno fixo, sem corpo ou Retry-After.
 							case 400 -> new ProviderOutcome.PermanentFailure("PROVIDER_REJECTED");
+							case 429, 503 -> classifyRetryableResponse(status, response.getHeaders());
 							// Um 500 pode ocorrer depois de o provedor efetivar a ativação; não reenvia automaticamente.
 							case 500 -> new ProviderOutcome.Indeterminate("PROVIDER_INTERNAL_ERROR_OUTCOME_UNKNOWN");
 							// Status e Retry-After não provam que o provedor deixou de ativar o produto.
@@ -86,6 +101,44 @@ public class HttpActivationProviderClient implements ActivationProviderClient {
 	}
 
 	private record ResponseResult(int status, ProviderOutcome outcome) {
+	}
+
+	private ProviderOutcome classifyRetryableResponse(int status, HttpHeaders headers) {
+		if (retryContract != RetryContract.REJECTED_BEFORE_ACTIVATION) {
+			return new ProviderOutcome.Indeterminate("PROVIDER_UNCONFIRMED_RESPONSE");
+		}
+		String code = status == 429 ? "PROVIDER_RATE_LIMITED" : "PROVIDER_TEMPORARILY_UNAVAILABLE";
+		var values = headers.get(HttpHeaders.RETRY_AFTER);
+		if (values == null || values.isEmpty()) {
+			return new ProviderOutcome.TransientFailure(code, Optional.empty());
+		}
+		if (values.size() != 1) {
+			return new ProviderOutcome.Indeterminate("PROVIDER_RETRY_AFTER_UNSUPPORTED");
+		}
+		String value = values.getFirst().strip();
+		Instant deadline = null;
+		if (value.matches("[0-9]+")) {
+			try {
+				deadline = Instant.now().plusSeconds(Long.parseLong(value));
+			}
+			catch (NumberFormatException | ArithmeticException | DateTimeException exception) {
+				// Um prazo numérico enorme não pode virar ausência de prazo e antecipar o envio.
+				return new ProviderOutcome.Indeterminate("PROVIDER_RETRY_AFTER_UNSUPPORTED");
+			}
+		}
+		else {
+			try {
+				var date = headers.getFirstZonedDateTime(HttpHeaders.RETRY_AFTER);
+				deadline = date == null ? null : date.toInstant();
+			}
+			catch (IllegalArgumentException exception) {
+				// Header malformado não elimina o backoff positivo controlado pela aplicação.
+			}
+		}
+		if (deadline != null && deadline.isAfter(MAX_RETRY_AT)) {
+			return new ProviderOutcome.Indeterminate("PROVIDER_RETRY_AFTER_UNSUPPORTED");
+		}
+		return new ProviderOutcome.TransientFailure(code, Optional.ofNullable(deadline));
 	}
 
 	private static boolean isTimeout(Throwable failure) {

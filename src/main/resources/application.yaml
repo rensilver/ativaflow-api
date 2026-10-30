@@ -43,5 +43,6 @@ app:
   activation-provider:
     connect-timeout: ${ACTIVATION_PROVIDER_CONNECT_TIMEOUT:2s}
     read-timeout: ${ACTIVATION_PROVIDER_READ_TIMEOUT:5s}
+    retry-contract: ${ACTIVATION_PROVIDER_RETRY_CONTRACT:none}
     # Reserva de configuração; a autenticação depende do contrato do provedor.
     api-key: ${ACTIVATION_PROVIDER_API_KEY:}

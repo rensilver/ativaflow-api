@@ -78,9 +78,10 @@ O backoff inicia em 1 s, dobra por tentativa e limita a base a 1 min, com jitter
 adicional de até 25%, configuráveis em `app.worker.retry`. O jitter não reduz a
 base; o atraso deve ter pelo menos 1 ms. `Retry-After` é recebido como `Instant`
 opcional e funciona como limite mínimo, sem reduzir o backoff. O cliente HTTP
-classifica as respostas conforme a [ADR-0002](0002-contrato-minimo-provedor.md),
-mas não interpreta `Retry-After` nem produz `TransientFailure`: `429/503`
-permanecem indeterminados até haver garantia contratual de não ativação.
+classifica as respostas conforme a [ADR-0002](0002-contrato-minimo-provedor.md).
+Por padrão, `429/503` permanecem indeterminados. Somente o contrato opt-in
+`rejected-before-activation` autoriza `TransientFailure` e interpretação de
+`Retry-After`; exige garantia de que não houve ativação nem trabalho remoto pendente.
 
 ## Elegibilidade, posse e recuperação
 
@@ -238,7 +239,8 @@ buscar trabalho persistido. `poll()` e `processNext()` suspendem transações
 chamadoras com `NOT_SUPPORTED`; claim e preparação confirmam suas transações
 antes da chamada a `HttpActivationProviderClient`. O handler encaminha sucesso,
 rejeição permanente, falha transitória segura e resultado indeterminado aos
-serviços correspondentes. O cliente atual não produz falha transitória segura.
+serviços correspondentes. O cliente produz falha transitória segura para `429/503`
+somente com o contrato de rejeição antes da ativação selecionado explicitamente.
 O claim retoma diretamente trabalho seguro com lease vencido; o serviço de
 recuperação explícita não possui scheduler próprio.
 
@@ -260,7 +262,10 @@ classificação conservadora, inclusive na presença de `Retry-After`.
 `ActivationRequestWorkerTests` verifica a orquestração e a suspensão de transação
 com dependências simuladas. `ActivationRequestProviderRejectionTests` combina
 worker, cliente HTTP, WireMock e PostgreSQL para `400` e `503`, com scheduler
-desligado. Ainda falta reunir criação/commit, worker, HTTP real e GET para
-sucesso, `500` e timeout, além de testes de retomada com scheduler ativo,
+desligado e contrato padrão conservador. `ActivationRequestProcessingIntegrationTests`
+reúne criação/commit, scheduler/worker, HTTP real e GET para sucesso, `500` e timeout;
+`ActivationRequestSchedulerRestartTests` cobre retomada com scheduler ativo,
 conforme [A04](../../PENDING_ACTIONS.md#a04--completar-a-evidência-do-processamento-integrado).
-A interpretação de `Retry-After` é uma evolução contratual distinta em A06.
+`HttpActivationProviderRetryTests` e `ActivationRequestHttpRetryTests` cobrem
+interpretação de `Retry-After` no contrato opt-in e seu efeito no agendamento,
+nas chamadas efetivas e no limite de três tentativas.
